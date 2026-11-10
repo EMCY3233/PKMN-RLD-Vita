@@ -1,0 +1,53 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux-runner:
+    name: Runner (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencias
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libx11-dev libxrandr-dev libxi-dev libgl-dev libasound2-dev \
+            libpulse-dev libjack-jackd2-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev cmake
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: runner }
+      - name: Compilar decompilador y runner
+        working-directory: runner
+        run: cargo build --release -p gm8decompiler -p gm8emulator
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runner-linux
+          path: |
+            runner/target/release/gm8emulator
+            runner/target/release/gm8decompiler
+
+  vita-loader-test:
+    name: VPK de prueba (PS Vita)
+    runs-on: ubuntu-24.04
+    container: vitasdk/vitasdk:latest
+    steps:
+      - name: Herramientas base
+        run: apk add --no-cache git curl bash build-base || (apt-get update && apt-get install -y git curl build-essential)
+      - uses: actions/checkout@v4
+      - name: Rust nightly + cargo-vita
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Instalar cargo-vita
+        run: cargo install cargo-vita --locked
+      - name: Compilar VPK
+        working-directory: vita/loader-test
+        run: |
+          echo "VITASDK=$VITASDK"
+          cargo vita build vpk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-loader-test-vpk
+          path: vita/loader-test/target/armv7-sony-vita-newlibeabihf/release/*.vpk
