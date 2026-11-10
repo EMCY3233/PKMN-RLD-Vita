@@ -42,6 +42,7 @@ jobs:
           ls $VITASDK/arm-vita-eabi/lib | grep -iE "gl|shark|mathneon|taihen|kubridge|sdl|gxm" || true
           ls $VITASDK/arm-vita-eabi/include | grep -iE "gl|shark|sdl" || true
           ls $VITASDK/arm-vita-eabi/lib/libSceShaccCg* $VITASDK/arm-vita-eabi/lib/libSceShaccCgExt* 2>&1 || true
+      - name: Rust nightly + cargo-vita
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
