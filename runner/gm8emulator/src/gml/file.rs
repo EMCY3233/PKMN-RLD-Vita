@@ -155,7 +155,7 @@ impl TextHandle {
             }
             return Ok(TextHandle::Read(BufReader::new(open_read(path)?)));
         }
-        pak::invalidate(path);
+        pak::written(path);
         ensure_parent(path);
         let file = OpenOptions::new()
             .create(!read)
@@ -278,7 +278,7 @@ impl BinaryHandle {
     // requested for a file, we try first to create it and fail if it's exists.
     fn _open(path: &str, mode: AccessMode) -> io::Result<File> {
         if !matches!(mode, AccessMode::Read) {
-            pak::invalidate(path);
+            pak::written(path);
         }
         ensure_parent(path);
         let mut opts = OpenOptions::new();
@@ -448,13 +448,32 @@ pub fn file_exists(path: &str) -> bool {
 
 pub fn rename(from: &str, to: &str) -> Result<()> {
     if !Path::new(to).exists() {
-        std::fs::rename(from, to)?;
+        if Path::new(from).exists() {
+            pak::written(to);
+            std::fs::rename(from, to)?;
+            pak::mark_deleted(from);
+        } else if let Some(data) = pak::read(from) {
+            // renombrar un archivo que solo está en el paquete
+            pak::written(to);
+            ensure_parent(to);
+            std::fs::write(to, data)?;
+            pak::mark_deleted(from);
+        } else {
+            std::fs::rename(from, to)?;
+        }
     }
     Ok(())
 }
 
 pub fn copy(from: &str, to: &str) -> Result<()> {
-    std::fs::copy(from, to)?;
+    pak::written(to);
+    ensure_parent(to);
+    if Path::new(from).exists() {
+        std::fs::copy(from, to)?;
+    } else {
+        // copiar desde el paquete
+        std::fs::write(to, pak::read_any(from)?)?;
+    }
     Ok(())
 }
 
@@ -468,7 +487,7 @@ pub fn dir_create(path: &str) -> Result<()> {
 }
 
 pub fn delete(path: &str) -> Result<()> {
-    pak::invalidate(path);
+    pak::mark_deleted(path);
     if Path::new(path).exists() {
         std::fs::remove_file(path)?;
     }
@@ -511,6 +530,7 @@ pub fn load_animation(path: &str, imgnumb: usize) -> Result<Vec<RgbaImage>> {
 }
 
 pub fn save_image<P: AsRef<Path>>(path: P, image: RgbaImage) -> Result<()> {
+    pak::written(&path.as_ref().to_string_lossy());
     ensure_parent(&path.as_ref().to_string_lossy());
     // save to png if the filename is .png otherwise bmp regardless of filename
     if path.as_ref().extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("png")).unwrap_or(false) {

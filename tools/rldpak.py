@@ -32,6 +32,9 @@ MAGIC = b"RLDPAK1\0"
 # Archivos que no se empaquetan: herramientas de Windows, basura del sistema, temporales de Office
 SKIP_EXT = {".exe", ".dll_backup"}
 SKIP_NAMES = {"desktop.ini", "thumbs.db"}
+# Datos del jugador: nunca van en el paquete (si se empaqueta una carpeta ya jugada, se quedarían
+# partidas o capturas ajenas dentro)
+SKIP_DIRS = {"data/partidas", "data/capturas"}
 
 
 def norm(rel: str) -> str:
@@ -50,6 +53,8 @@ def collect(game_dir: str, midi_mp3: str | None):
                 continue
             full = os.path.join(root, n)
             rel = os.path.relpath(full, game_dir)
+            if any(norm(rel).startswith(d + "/") for d in SKIP_DIRS):
+                continue
             if midi_mp3 and low.endswith(".mid"):
                 mp3 = os.path.join(midi_mp3, os.path.splitext(rel)[0] + ".mp3")
                 if os.path.isfile(mp3) and os.path.getsize(mp3) > 0:

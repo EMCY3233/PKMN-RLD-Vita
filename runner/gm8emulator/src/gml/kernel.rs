@@ -8676,9 +8676,20 @@ impl Game {
             let mut frames = Vec::with_capacity(n);
             for _ in 0..n {
                 let (w, h, len) = (u32_at(&z, p + 4)?, u32_at(&z, p + 8)?, u32_at(&z, p + 12)? as usize);
-                let data = z.get(p + 16..p + 16 + len)?.to_vec();
-                if len != (w * h * 4) as usize {
+                let mut data = z.get(p + 16..(p + 16).checked_add(len)?)?.to_vec();
+                if (w as usize).checked_mul(h as usize)?.checked_mul(4)? != len {
                     return None
+                }
+                // GM8 exige que todos los fotogramas tengan el mismo tamaño
+                if let Some(f0) = frames.first() {
+                    let f0: &RgbaImage = f0;
+                    if f0.dimensions() != (w, h) {
+                        return None
+                    }
+                }
+                // el archivo guarda BGRA y el renderizador espera RGBA (como sprite_add)
+                for px in data.chunks_exact_mut(4) {
+                    px.swap(0, 2);
                 }
                 frames.push(RgbaImage::from_vec(w, h, data)?);
                 p += 16 + len;
@@ -8706,8 +8717,9 @@ impl Game {
         let tolerance = tolerance.min(255) as u8;
         let sepmasks = sepmasks != 0;
         // el canal alfa está en la misma posición en BGRA y RGBA, así que las máscaras salen igual
+        // igual que sprite_collision_mask: forma precisa = máscara precisa (la caja se impone después)
         let mut colliders = match shape {
-            0 if bbox.is_none() => asset::sprite::make_colliders_precise(&frames, tolerance, sepmasks),
+            0 => asset::sprite::make_colliders_precise(&frames, tolerance, sepmasks),
             _ => asset::sprite::make_colliders_shaped(&frames, tolerance, sepmasks, bbox, match shape {
                 1 => Some(asset::sprite::ColliderShape::Rectangle),
                 2 => Some(asset::sprite::ColliderShape::Ellipse),

@@ -252,7 +252,29 @@ impl<'a> P<'a> {
             if paren && !self.lit(b")") {
                 return None
             }
-            self.lit(b";");
+            // la sentencia debe terminar aquí: ';', '}', fin, o el comienzo de otra sentencia
+            // (evita aceptar "return(5)+1;" como "return(5)")
+            if !self.lit(b";") {
+                self.ws();
+                let rest = &self.s[self.i..];
+                let next_is_stmt = rest.is_empty()
+                    || rest[0] == b'}'
+                    || (rest.starts_with(b"if") && rest.get(2).map_or(true, |c| !c.is_ascii_alphanumeric() && *c != b'_'));
+                if !next_is_stmt {
+                    return None
+                }
+            }
+            // un "else" a continuación pertenece a este if: no se puede convertir en tabla
+            {
+                let save = self.i;
+                self.ws();
+                let rest = &self.s[self.i..];
+                let is_else = rest.starts_with(b"else") && rest.get(4).map_or(true, |c| !c.is_ascii_alphanumeric() && *c != b'_');
+                self.i = save;
+                if is_else {
+                    return None
+                }
+            }
             Some((key, v))
         })();
         if r.is_none() {
@@ -269,6 +291,32 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
     let mut made = 0;
     let mut copied = 0;
     while i < src.len() {
+        // saltar cadenas ("..." y '...', sin escapes en GM8) y comentarios (// y /* */)
+        match src[i] {
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < src.len() && src[i] != q {
+                    i += 1;
+                }
+                i += 1;
+                continue
+            },
+            b'/' if src.get(i + 1) == Some(&b'/') => {
+                while i < src.len() && src[i] != b'\n' {
+                    i += 1;
+                }
+                continue
+            },
+            b'/' if src.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < src.len() && !(src[i] == b'*' && src[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue
+            },
+            _ => (),
+        }
         // inicio de sentencia: principio, o tras ';', '{' o '}' (nunca tras un if/else sin llaves)
         let at_stmt = {
             let mut j = i;
@@ -277,7 +325,7 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
             }
             j == 0 || matches!(src[j - 1], b';' | b'{' | b'}')
         };
-        if at_stmt && src[i..].starts_with(b"if") {
+        if at_stmt && src[i..].starts_with(b"if") && src.get(i + 2).map_or(false, |c| !c.is_ascii_alphanumeric() && *c != b'_') {
             let mut p = P { s: src, i };
             let mut entries = Vec::new();
             let mut end = i;
@@ -425,4 +473,141 @@ pub fn detect_ex_dispatcher(scripts: &[Option<Box<gm8exe::asset::Script>>]) -> O
         }
     }
     None
+}
+
+impl crate::game::Game {
+    /// Diagnóstico de arranque (runner.log): carpetas, acceso al paquete con las mismas rutas que
+    /// construye el juego, y prueba de escritura donde se guardan las partidas.
+    pub fn startup_diagnostics(&mut self) {
+        use crate::gml::{file, pak};
+        let log = crate::startlog;
+        let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|e| format!("ERROR {e}"));
+        log(&format!("Diagnóstico: carpeta actual (working_directory) = '{}'", cwd));
+        log(&format!("Diagnóstico: program_directory = '{}'", String::from_utf8_lossy(self.program_directory.as_ref())));
+        log(&format!("Diagnóstico: temp_directory = '{}'", String::from_utf8_lossy(self.temp_directory.as_ref())));
+        // como ImportBattlePokemon: working_directory + "\data\pkmnbattle\P1_2.gmspr"
+        for p in [format!("{}\\data\\pkmnbattle\\P1_2.gmspr", cwd), "data\\text\\es\\txt_menu.dll".to_string()] {
+            let tp = file::to_path(&p).into_owned();
+            log(&format!("Diagnóstico: file_exists('{}') = {}  [{}]", p, file::file_exists(&tp), pak::describe(&tp)));
+        }
+        // prueba de escritura en la carpeta de partidas (relativa, como hace el juego)
+        let test = file::to_path("data\\partidas\\_rld_prueba_escritura.txt").into_owned();
+        let res = (|| -> std::io::Result<bool> {
+            if let Some(parent) = std::path::Path::new(&test).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&test, b"prueba")?;
+            let ok = std::fs::read(&test)? == b"prueba";
+            std::fs::remove_file(&test)?;
+            Ok(ok)
+        })();
+        log(&format!(
+            "Diagnóstico: escritura de partidas en '{}': {}",
+            test,
+            match res {
+                Ok(true) => "OK".to_string(),
+                Ok(false) => "ERROR: lo leído no coincide".to_string(),
+                Err(e) => format!("ERROR {e}"),
+            }
+        ));
+    }
+}
+
+/// Prueba de borrados/escrituras sobre el paquete (RLD_SELFTEST_FS=1, en una copia de la carpeta)
+pub fn selftest_fs() {
+    use crate::gml::file;
+    let p = "data\\audio\\config.ini";
+    let tp = file::to_path(p).into_owned();
+    let log = crate::startlog;
+    let before = file::file_exists(&tp);
+    let _ = file::delete(&tp);
+    let after_delete = file::file_exists(&tp);
+    let read_after_delete = file::read_any(&tp).is_ok();
+    log(&format!(
+        "SELFTEST fs: existe={} -> tras borrar existe={} legible={}; rld_borrados.txt = {:?}",
+        before,
+        after_delete,
+        read_after_delete,
+        std::fs::read_to_string("rld_borrados.txt").ok()
+    ));
+}
+
+pub fn selftest_fs_2() {
+    use crate::gml::file;
+    let tp = file::to_path("data\\audio\\config.ini").into_owned();
+    let log = crate::startlog;
+    log(&format!("SELFTEST fs (tras reiniciar): existe={}", file::file_exists(&tp)));
+    std::fs::write(&tp, b"77").ok();
+    crate::gml::pak::written(&tp);
+    log(&format!(
+        "SELFTEST fs: tras escribir existe={} contenido={:?} rld_borrados.txt existe={}",
+        file::file_exists(&tp),
+        file::read_any(&tp).ok().map(|b| String::from_utf8_lossy(&b).into_owned()),
+        std::path::Path::new("rld_borrados.txt").exists()
+    ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_lookup_chains;
+
+    fn chain(n: usize, tail: &str) -> String {
+        let mut s = String::from("var a; a=1; ");
+        for k in 0..n {
+            s.push_str(&format!("if(argument0={})return({});", k, k * 10));
+        }
+        s.push_str(tail);
+        s
+    }
+
+    #[test]
+    fn tabla_normal() {
+        let (out, n) = rewrite_lookup_chains(chain(10, " return(-1);").as_bytes()).unwrap();
+        assert_eq!(n, 1);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.starts_with("var a; a=1; if(rld_lookup_has("), "{out}");
+        assert!(out.ends_with(" return(-1);"), "{out}");
+    }
+
+    #[test]
+    fn expresion_tras_return_no_es_tabla() {
+        // la última entrada "return(9)+1" no es un literal: el bloque válido son las 9 primeras
+        let mut s = String::new();
+        for k in 0..9 {
+            s.push_str(&format!("if(argument0={})return({});", k, k));
+        }
+        s.push_str("if(argument0=9)return(9)+1;");
+        let (out, _) = rewrite_lookup_chains(s.as_bytes()).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("if(argument0=9)return(9)+1;"), "{out}");
+    }
+
+    #[test]
+    fn else_no_se_separa() {
+        let mut s = String::new();
+        for k in 0..9 {
+            s.push_str(&format!("if(argument0={})return({});", k, k));
+        }
+        s.push_str("if(argument0=9)return(9); else x=1;");
+        let (out, _) = rewrite_lookup_chains(s.as_bytes()).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("if(argument0=9)return(9); else x=1;"), "{out}");
+    }
+
+    #[test]
+    fn dentro_de_cadena_no_se_toca() {
+        let inner = chain(10, "");
+        let s = format!("x=\"{}\"; y='{}'; // {}\n", inner, inner, inner);
+        assert!(rewrite_lookup_chains(s.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn cuerpo_de_if_sin_llaves_no_se_toca() {
+        let s = format!("if(b) {}", chain(10, "").replace("var a; a=1; ", ""));
+        let out = rewrite_lookup_chains(s.as_bytes()).map(|(o, _)| String::from_utf8(o).unwrap());
+        // la primera entrada pertenece al if(b); solo puede reescribirse el resto
+        if let Some(o) = out {
+            assert!(o.starts_with("if(b) if(argument0=0)return(0);"), "{o}");
+        }
+    }
 }

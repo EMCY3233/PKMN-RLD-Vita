@@ -325,6 +325,11 @@ fn xmain() -> i32 {
         if env::var_os("RLD_SELFTEST").is_some() {
             game::accel::selftest_text_lines(dir);
         }
+        match env::var("RLD_SELFTEST_FS").as_deref() {
+            Ok("1") => game::accel::selftest_fs(),
+            Ok("2") => game::accel::selftest_fs_2(),
+            _ => (),
+        }
     }
 
     let play_type = if project_path.is_some() {
@@ -353,6 +358,7 @@ fn xmain() -> i32 {
         },
     };
 
+    components.startup_diagnostics();
     if env::var_os("RLD_SELFTEST").is_some() {
         components.accel_selftest_tables();
     }

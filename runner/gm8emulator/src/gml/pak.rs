@@ -15,6 +15,10 @@ use std::{
 const MAGIC: &[u8; 8] = b"RLDPAK1\0";
 
 pub struct Pak {
+    /// Archivos del paquete que el juego ha borrado (persistente en rld_borrados.txt): para el juego
+    /// dejan de existir, igual que si hubiera borrado el archivo real en un PC.
+    deleted: Mutex<HashSet<String>>,
+    deleted_file: std::path::PathBuf,
     file: Mutex<File>,
     index: HashMap<String, (u64, u32)>,
     dirs: HashSet<String>,
@@ -119,6 +123,16 @@ fn norm(path: &str) -> String {
     while s.contains("//") {
         s = s.replace("//", "/");
     }
+    // Vita: "ux0:/data/..." y "ux0:data/..." son la misma ruta
+    if let Some(p) = s.find(":/") {
+        if p > 0 && s[..p].bytes().all(|c| c.is_ascii_alphanumeric()) {
+            s.remove(p + 1);
+        }
+    }
+    // "./" intermedios
+    while s.contains("/./") {
+        s = s.replace("/./", "/");
+    }
     s
 }
 
@@ -161,7 +175,11 @@ fn open(game_dir: &Path) -> std::io::Result<Pak> {
     if !base.ends_with('/') {
         base.push('/');
     }
-    Ok(Pak { file: Mutex::new(f), index, dirs, base })
+    let deleted_file = game_dir.join("rld_borrados.txt");
+    let deleted = std::fs::read_to_string(&deleted_file)
+        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default();
+    Ok(Pak { deleted: Mutex::new(deleted), deleted_file, file: Mutex::new(f), index, dirs, base })
 }
 
 fn get() -> Option<&'static Pak> {
@@ -182,8 +200,53 @@ fn key(pak: &Pak, path: &str) -> Option<String> {
     Some(s.trim_end_matches('/').to_string())
 }
 
+fn is_deleted(p: &Pak, k: &str) -> bool {
+    p.deleted.lock().map(|d| d.contains(k)).unwrap_or(false)
+}
+
+fn save_deleted(p: &Pak, d: &HashSet<String>) {
+    let mut v: Vec<&String> = d.iter().collect();
+    v.sort();
+    let text: String = v.iter().map(|k| format!("{k}\n")).collect();
+    if text.is_empty() {
+        let _ = std::fs::remove_file(&p.deleted_file);
+    } else {
+        let _ = std::fs::write(&p.deleted_file, text);
+    }
+}
+
 pub fn exists(path: &str) -> bool {
-    get().and_then(|p| key(p, path).map(|k| p.index.contains_key(&k))).unwrap_or(false)
+    get().and_then(|p| key(p, path).map(|k| p.index.contains_key(&k) && !is_deleted(p, &k))).unwrap_or(false)
+}
+
+/// El juego ha borrado `path`: si estaba en el paquete, deja de existir para él.
+pub fn mark_deleted(path: &str) {
+    invalidate(path);
+    if let Some(p) = get() {
+        if let Some(k) = key(p, path) {
+            if p.index.contains_key(&k) {
+                if let Ok(mut d) = p.deleted.lock() {
+                    if d.insert(k) {
+                        save_deleted(p, &d);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// El juego va a escribir `path` en disco: olvidar cachés y un posible borrado anterior.
+pub fn written(path: &str) {
+    invalidate(path);
+    if let Some(p) = get() {
+        if let Some(k) = key(p, path) {
+            if let Ok(mut d) = p.deleted.lock() {
+                if d.remove(&k) {
+                    save_deleted(p, &d);
+                }
+            }
+        }
+    }
 }
 
 pub fn dir_exists(path: &str) -> bool {
@@ -192,7 +255,11 @@ pub fn dir_exists(path: &str) -> bool {
 
 pub fn read(path: &str) -> Option<Vec<u8>> {
     let pak = get()?;
-    let &(off, size) = pak.index.get(&key(pak, path)?)?;
+    let k = key(pak, path)?;
+    if is_deleted(pak, &k) {
+        return None
+    }
+    let &(off, size) = pak.index.get(&k)?;
     let mut f = pak.file.lock().ok()?;
     f.seek(SeekFrom::Start(off)).ok()?;
     let mut buf = vec![0u8; size as usize];
@@ -200,10 +267,38 @@ pub fn read(path: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Diagnóstico: ¿hay paquete? y clave a la que se traduciría una ruta
+pub fn describe(path: &str) -> String {
+    match get() {
+        None => "sin reloaded.pak".into(),
+        Some(p) => format!(
+            "base del paquete '{}', ruta '{}' -> clave {:?}, en paquete: {}",
+            p.base,
+            path,
+            key(p, path),
+            exists(path)
+        ),
+    }
+}
+
 /// Lee un archivo del disco o, si no existe, del paquete.
 pub fn read_any(path: &str) -> std::io::Result<Vec<u8>> {
     match std::fs::read(path) {
         Ok(b) => Ok(b),
         Err(e) => read(path).ok_or(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::norm;
+
+    #[test]
+    fn rutas_de_vita() {
+        assert_eq!(norm("ux0:/data/reloaded\\data\\x.png"), "ux0:data/reloaded/data/x.png");
+        assert_eq!(norm("ux0:data/reloaded/data/X.PNG"), "ux0:data/reloaded/data/x.png");
+        assert_eq!(norm("ux0:data/reloaded//./data/x.png"), "ux0:data/reloaded/data/x.png");
+        assert_eq!(norm("data\\text\\es\\a.dll"), "data/text/es/a.dll");
+        assert_eq!(norm("/root/juego/data/a"), "/root/juego/data/a");
     }
 }

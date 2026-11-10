@@ -77,3 +77,26 @@ desactiva y `RLD_SELFTEST=1` compara ambas versiones.
 - [vitaGL](https://github.com/TheOfficialFloW/vitaGL) (OpenGL acelerado por hardware en Vita; ETC1 acelerado)
 - [PS Vita Dev Wiki – CPU](https://psdevwiki.com/vita/CPU)
 - [Vita Rust Book – Memoria](https://vita-rust.github.io/book/dev/mem.html)
+
+## 5. Auditoría completa (10/11/2026, tarde)
+
+Revisión línea a línea de los ~3100 cambios sobre OpenGMK. Fallos encontrados y corregidos:
+
+| Gravedad | Fallo | Corrección | Verificación |
+|---|---|---|---|
+| Alta | Sprites `.gmspr` (todos los Pokémon) con rojo y azul invertidos: el archivo guarda BGRA y el renderizador espera RGBA | Conversión BGRA→RGBA | Captura: Eevee, Pikachu y Riolu con sus colores |
+| Alta | `reloaded.pak` entregado contenía `data/partidas/reloaded1.data`, una partida creada por un benchmark | Paquete regenerado desde el zip original; `rldpak.py` excluye `data/partidas` y `data/capturas` | `rldpak list`: 0 archivos de partidas |
+| Media | En Vita, `working_directory` podría devolverse como `ux0:/…` y no coincidir con la ruta del paquete (sprites de Pokémon no encontrados) | Normalización `ux0:/` = `ux0:`; diagnóstico de arranque en `runner.log` | Prueba unitaria + diagnóstico |
+| Media | Borrar un archivo que viene en el paquete (p. ej. `config.ini`) no lo hacía desaparecer para el juego | Registro persistente de borrados (`rld_borrados.txt`); escribir lo restaura | Prueba de borrado/escritura/reinicio |
+| Media | Reescritura de tablas: aceptaba `return(5)+1;`, separaba un `else` y podía actuar dentro de cadenas/comentarios | Terminador obligatorio, rechazo de `else`, salto de cadenas y comentarios | 5 pruebas unitarias; 52 scripts / 23 546 casos idénticos |
+| Baja | `sprite_add_sprite`: desbordamiento con archivos corruptos, fotogramas de distinto tamaño, máscara precisa con caja manual distinta de `sprite_collision_mask` | Comprobaciones y mismo criterio | — |
+| Baja | `update_port.sh` convertía MIDI a MP3 (~500 MB) sin usar el resultado; el informe no detectaba funciones sin implementar | Script reescrito: informe de funciones sin implementar y de aceleradores | Ejecutado sobre 1.9.2.2 |
+| Baja | `file_copy`/`file_rename` no funcionaban con archivos que solo están en el paquete | Copia/renombrado desde el paquete | — |
+
+Revisado sin fallos: funciones implementadas (`room_set_code`, `sound_replace` con MIDI, teclas simuladas,
+`keyboard_string`), compilación diferida, despachador `ex` (rellena los 15 argumentos), listas de eventos,
+pila de 16 MB, memoria. Ninguna función/variable sin implementar usada por el juego. Única función que lee
+píxeles: `screen_save` (capturas de pantalla), sin efecto en la lógica.
+
+Pendiente de confirmar en consola (lo dirá `runner.log`): rutas reales de la Vita y escritura de partidas.
+Recorrido final: salas y fotogramas idénticos con y sin aceleradores; versión de PC con gráficos sin errores.
