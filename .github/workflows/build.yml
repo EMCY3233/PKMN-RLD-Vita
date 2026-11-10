@@ -42,6 +42,14 @@ jobs:
           ls $VITASDK/arm-vita-eabi/lib | grep -iE "gl|shark|mathneon|taihen|kubridge|sdl|gxm" || true
           ls $VITASDK/arm-vita-eabi/include | grep -iE "gl|shark|sdl" || true
           ls $VITASDK/arm-vita-eabi/lib/libSceShaccCg* $VITASDK/arm-vita-eabi/lib/libSceShaccCgExt* 2>&1 || true
+          mkdir -p inv && cp $VITASDK/arm-vita-eabi/include/vitaGL.h inv/ || true
+          arm-vita-eabi-nm -g --defined-only $VITASDK/arm-vita-eabi/lib/libvitaGL.a 2>/dev/null | awk '$2=="T"{print $3}' | sort -u > inv/vitagl_symbols.txt || true
+          wc -l inv/vitagl_symbols.txt || true
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: inventario-vitagl
+          path: inv/
       - name: Rust nightly + cargo-vita
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
