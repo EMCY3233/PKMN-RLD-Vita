@@ -70,6 +70,8 @@ jobs:
         working-directory: runner/gm8emulator
         env:
           RUSTUP_TOOLCHAIN: nightly
+          # simd-adler32 (decodificador PNG) usa intrínsecos NEON, aún inestables en ARM de 32 bits
+          RUSTFLAGS: "-Zcrate-attr=feature(stdarch_arm_neon_intrinsics)"
         run: cargo vita build vpk -- --release --no-default-features --features vita
       - uses: actions/upload-artifact@v4
         with:
