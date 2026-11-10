@@ -1,6 +1,6 @@
 # Gráficos en PS Vita (vitaGL)
 
-Estado: **primera versión compilada, pendiente de probar en la consola** (10/11/2026).
+Estado: **el juego arranca en la PS Vita con gráficos** (11/11/2026). Arreglos necesarios en consola: vglInit devuelve GL_FALSE en un inicio normal; shaders sin el nombre `lerp` ni `mod` de vec2 (traductor GLSL→CG de vitaGL).
 
 ## Qué usa el juego
 
