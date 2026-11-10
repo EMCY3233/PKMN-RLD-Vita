@@ -74,7 +74,18 @@ jobs:
           RUSTFLAGS: "-Zcrate-attr=feature(stdarch_arm_neon_intrinsics)"
           # strip es incompatible con -Wl,-q (la Vita necesita conservar las relocalizaciones)
           CARGO_PROFILE_RELEASE_STRIP: "false"
-        run: cargo vita build vpk -- --release --no-default-features --features vita
+        shell: bash
+        run: |
+          # Si vita-elf-create no encuentra hueco tras el código (depende del tamaño exacto del
+          # binario), se recompila con 8 KB de relleno (ver ELF_PAD en main.rs)
+          if ! cargo vita build vpk -- --release --no-default-features --features vita 2>&1 | tee build.log; then
+            if grep -q "for SCE data at end of segment" build.log; then
+              echo "::warning::vita-elf-create sin hueco; recompilando con relleno"
+              RLD_ELF_PAD=1 cargo vita build vpk -- --release --no-default-features --features vita
+            else
+              exit 1
+            fi
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: reloaded-runner-bench-vpk

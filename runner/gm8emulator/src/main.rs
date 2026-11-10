@@ -110,6 +110,17 @@ const VITA_DIR: &str = "ux0:data/reloaded";
 #[no_mangle]
 pub static _newlib_heap_size_user: u32 = 280 * 1024 * 1024;
 
+/// Relleno opcional al final del segmento de código (RLD_ELF_PAD=1 al compilar).
+/// vita-elf-create necesita ~1,6 KB libres tras el código, y el segmento de datos empieza en el
+/// siguiente megabyte: si el código acaba justo antes de ese límite, falla con "Cannot allocate ...
+/// for SCE data at end of segment 0". El CI recompila con este relleno solo en ese caso.
+#[cfg(target_os = "vita")]
+const ELF_PAD: usize = if option_env!("RLD_ELF_PAD").is_some() { 8192 } else { 0 };
+#[cfg(target_os = "vita")]
+#[used]
+#[link_section = ".rodata.rld_elf_pad"]
+static RLD_ELF_PAD: [u8; ELF_PAD] = [0; ELF_PAD];
+
 fn xmain() -> i32 {
     #[cfg(not(target_os = "vita"))]
     let args: Vec<String> = env::args().collect();
