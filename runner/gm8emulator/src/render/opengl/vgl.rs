@@ -49,6 +49,7 @@ unsafe fn bgra_to_rgba(format: GLenum, ty: GLenum, w: GLsizei, h: GLsizei, data:
 extern "C" {
     fn vglInitExtended(legacy_pool_size: c_int, width: c_int, height: c_int, ram_threshold: c_int, msaa: c_int) -> u8;
     fn vglGetProcAddress(name: *const c_char) -> *mut c_void;
+    fn vglSetSemanticBindingMode(mode: c_int);
     fn vglSwapBuffers(has_commondialog: u8);
     fn vglWaitVblankStart(enable: u8);
 }
@@ -230,6 +231,10 @@ impl PlatformImpl {
         // no vuelve. Un segundo intento tras un inicio correcto se rechaza ("already inited").
         let mb = 1024 * 1024;
         let fallback = vglInitExtended(0, 960, 544, 16 * mb, 0) != 0;
+        // Traducir y compilar cada shader en glCompileShader (modo «par de shaders») en vez de
+        // aplazarlo a glLinkProgram: así un error de compilación se detecta y se apunta en
+        // runner.log, en vez de enlazar un programa vacío (cierre en sceGxm).
+        vglSetSemanticBindingMode(0 /* VGL_MODE_SHADER_PAIR */);
         let after = free_memory();
         crate::startlog(&format!(
             "vitaGL iniciado{} (libre después: RAM {} MB, CDRAM {} MB, phycont {} MB)",

@@ -663,7 +663,7 @@ impl RendererImpl {
                     colour_blending: u("colour_blending"),
                     tex_size: u("tex_size"),
                     repeat: u("repeat"),
-                    lerp: u("lerp"),
+                    lerp: u("interp"),
                     alpha_test: u("alpha_test"),
                     fog_enabled: u("fog_enabled"),
                     fog_begin: u("fog_begin"),

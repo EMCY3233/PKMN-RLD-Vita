@@ -2,7 +2,7 @@
 uniform sampler2D tex;
 uniform vec2 tex_size;
 uniform float repeat;
-uniform float lerp;
+uniform float interp; // no se llama lerp: en vitaGL mix() se convierte en esa función de CG
 uniform float alpha_test;
 uniform float fog_enabled;
 uniform float fog_begin;
@@ -20,10 +20,13 @@ void main() {
     vec2 wh = frag_atlas_xywh.zw;
     if (repeat > 0.5) {
         sprite_coord = fract(frag_tex_coord) * wh;
-        if (lerp > 0.5) {
+        if (interp > 0.5) {
             vec2 floor_coord = floor(sprite_coord - 0.5);
-            vec2 topleft = (frag_atlas_xywh.xy + mod(floor_coord + 0.5, wh)) / tex_size;
-            vec2 botright = (frag_atlas_xywh.xy + mod(floor_coord + 1.5, wh)) / tex_size;
+            // el traductor de vitaGL no tiene módulo vec2 entre vec2: fórmula explícita
+            vec2 a = floor_coord + 0.5;
+            vec2 b = floor_coord + 1.5;
+            vec2 topleft = (frag_atlas_xywh.xy + (a - wh * floor(a / wh))) / tex_size;
+            vec2 botright = (frag_atlas_xywh.xy + (b - wh * floor(b / wh))) / tex_size;
             vec4 sampleTL = texture2D(tex, topleft);
             vec4 sampleTR = texture2D(tex, vec2(botright.x, topleft.y));
             vec4 sampleBL = texture2D(tex, vec2(topleft.x, botright.y));
