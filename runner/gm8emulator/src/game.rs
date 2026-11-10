@@ -10,6 +10,7 @@ pub mod movement;
 pub mod particle;
 pub mod pathfinding;
 pub mod platform;
+pub mod accel;
 pub mod bench;
 #[cfg(feature = "desktop")]
 pub mod recording;
@@ -3103,6 +3104,7 @@ impl Game {
             },
             _ => return Err(gml::Error::NonexistentAsset(asset::Type::Script, id as i32)),
         };
+        let src = crate::game::accel::rewrite_script(&self.assets.scripts, id, src);
         let code = self
             .compiler
             .compile(src.as_ref())

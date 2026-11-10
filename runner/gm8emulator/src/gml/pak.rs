@@ -24,6 +24,96 @@ pub struct Pak {
 
 static PAK: OnceLock<Option<Pak>> = OnceLock::new();
 
+/// Caché en memoria de archivos de solo lectura que el juego relee constantemente
+/// (data/text/*: TextReader abre txt_dialog.dll, de 1,5 MB, para sacar cada línea de diálogo).
+/// En PS Vita cada relectura desde la tarjeta costaba ~100 ms.
+static CACHE: Mutex<Option<HashMap<String, std::sync::Arc<[u8]>>>> = Mutex::new(None);
+const CACHE_MAX_FILE: usize = 4 * 1024 * 1024;
+
+fn cacheable(k: &str) -> bool {
+    k.starts_with("data/text/") && !k.ends_with(".ini")
+}
+
+/// Clave normalizada de una ruta del juego (aunque no haya paquete)
+fn any_key(path: &str) -> String {
+    match get() {
+        Some(p) => key(p, path).unwrap_or_else(|| norm(path)),
+        None => norm(path),
+    }
+}
+
+/// Lectura con caché: disco primero, paquete después; guarda en memoria los textos del juego.
+pub fn read_cached(path: &str) -> Option<std::sync::Arc<[u8]>> {
+    let k = any_key(path);
+    let use_cache = cacheable(&k);
+    if use_cache {
+        if let Some(c) = CACHE.lock().ok().and_then(|c| c.as_ref().and_then(|m| m.get(&k).cloned())) {
+            return Some(c)
+        }
+    }
+    let data: std::sync::Arc<[u8]> = read_any(path).ok()?.into();
+    if use_cache && data.len() <= CACHE_MAX_FILE {
+        if let Ok(mut c) = CACHE.lock() {
+            c.get_or_insert_with(HashMap::new).insert(k, data.clone());
+        }
+    }
+    Some(data)
+}
+
+/// Índices de inicio de línea de los textos en caché (para rld_text_line)
+static LINES: Mutex<Option<HashMap<String, std::sync::Arc<Vec<u32>>>>> = Mutex::new(None);
+
+/// Línea `line` (1 = primera) de un archivo de texto, igual que haría el GML:
+/// saltar line-1 veces con file_text_readln y leer con file_text_read_string (sin \r\n).
+/// Devuelve None si el archivo no existe; Some(vacío) si la línea no existe.
+pub fn text_line(path: &str, line: i64) -> Option<Vec<u8>> {
+    let data = read_cached(path)?;
+    let k = any_key(path);
+    let starts = {
+        let mut g = LINES.lock().ok()?;
+        let m = g.get_or_insert_with(HashMap::new);
+        m.entry(k)
+            .or_insert_with(|| {
+                let mut v = vec![0u32];
+                for (i, &b) in data.iter().enumerate() {
+                    if b == 0x0a {
+                        v.push(i as u32 + 1);
+                    }
+                }
+                std::sync::Arc::new(v)
+            })
+            .clone()
+    };
+    let idx = (line.max(1) - 1) as usize;
+    let Some(&start) = starts.get(idx) else { return Some(Vec::new()) };
+    let start = start as usize;
+    // el bucle original devuelve "???" si llega al final antes de la línea pedida
+    if starts[..idx].iter().any(|&s| s as usize >= data.len()) || start >= data.len() {
+        return Some(Vec::new())
+    }
+    let end = data[start..].iter().position(|&b| b == 0x0a).map_or(data.len(), |p| start + p);
+    let mut out = data[start..end].to_vec();
+    if out.last() == Some(&0x0d) {
+        out.pop();
+    }
+    Some(out)
+}
+
+/// Olvida un archivo de la caché (cuando el juego lo escribe o lo borra)
+pub fn invalidate(path: &str) {
+    let k = any_key(path);
+    if let Ok(mut c) = CACHE.lock() {
+        if let Some(m) = c.as_mut() {
+            m.remove(&k);
+        }
+    }
+    if let Ok(mut c) = LINES.lock() {
+        if let Some(m) = c.as_mut() {
+            m.remove(&k);
+        }
+    }
+}
+
 fn norm(path: &str) -> String {
     let mut s = path.replace('\\', "/").to_lowercase();
     while s.contains("//") {

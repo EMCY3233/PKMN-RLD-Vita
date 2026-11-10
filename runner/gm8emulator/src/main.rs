@@ -322,6 +322,9 @@ fn xmain() -> i32 {
         #[cfg(target_os = "vita")]
         let _ = env::set_current_dir(dir);
         gml::pak::init(dir);
+        if env::var_os("RLD_SELFTEST").is_some() {
+            game::accel::selftest_text_lines(dir);
+        }
     }
 
     let play_type = if project_path.is_some() {

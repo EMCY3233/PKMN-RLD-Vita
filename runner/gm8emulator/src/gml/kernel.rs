@@ -6039,6 +6039,14 @@ impl Game {
         }
     }
 
+    /// rld_text_line(archivo, línea): línea de un archivo de texto sin recorrerlo en GML.
+    /// Devuelve "" si el archivo o la línea no existen (el TextReader original devolvía "???" en ambos casos).
+    pub fn rld_text_line(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let (filename, line) = expect_args!(args, [string, int])?;
+        let line = gml::pak::text_line(file::to_path(&filename).as_ref(), line as i64).unwrap_or_default();
+        Ok(gml::String::from(line).into())
+    }
+
     pub fn file_text_readln(&mut self, args: &[Value]) -> gml::Result<Value> {
         let handle = expect_args!(args, [int])?;
         match self.text_files.get_mut(handle - 1).map_or(Err(file::Error::InvalidFile(handle)), |f| f.skip_line()) {

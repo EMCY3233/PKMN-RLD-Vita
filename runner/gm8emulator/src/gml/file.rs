@@ -14,15 +14,16 @@ use super::pak;
 pub enum RFile {
     Disk(File),
     Mem(io::Cursor<Vec<u8>>),
+    Shared(io::Cursor<std::sync::Arc<[u8]>>),
 }
 impl Read for RFile {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self { Self::Disk(f) => f.read(buf), Self::Mem(c) => c.read(buf) }
+        match self { Self::Disk(f) => f.read(buf), Self::Mem(c) => c.read(buf), Self::Shared(c) => c.read(buf) }
     }
 }
 impl Seek for RFile {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        match self { Self::Disk(f) => f.seek(pos), Self::Mem(c) => c.seek(pos) }
+        match self { Self::Disk(f) => f.seek(pos), Self::Mem(c) => c.seek(pos), Self::Shared(c) => c.seek(pos) }
     }
 }
 
@@ -148,8 +149,13 @@ impl TextHandle {
         };
 
         if read {
+            // Los textos del juego se sirven desde la caché en memoria (ver pak::read_cached)
+            if let Some(data) = pak::read_cached(path) {
+                return Ok(TextHandle::Read(BufReader::new(RFile::Shared(io::Cursor::new(data)))));
+            }
             return Ok(TextHandle::Read(BufReader::new(open_read(path)?)));
         }
+        pak::invalidate(path);
         ensure_parent(path);
         let file = OpenOptions::new()
             .create(!read)
@@ -271,6 +277,9 @@ impl BinaryHandle {
     // function call every time. Instead, when a read-only or write-only mode was
     // requested for a file, we try first to create it and fail if it's exists.
     fn _open(path: &str, mode: AccessMode) -> io::Result<File> {
+        if !matches!(mode, AccessMode::Read) {
+            pak::invalidate(path);
+        }
         ensure_parent(path);
         let mut opts = OpenOptions::new();
 
@@ -459,6 +468,7 @@ pub fn dir_create(path: &str) -> Result<()> {
 }
 
 pub fn delete(path: &str) -> Result<()> {
+    pak::invalidate(path);
     if Path::new(path).exists() {
         std::fs::remove_file(path)?;
     }
