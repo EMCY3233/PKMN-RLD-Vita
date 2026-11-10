@@ -129,8 +129,10 @@ static RLD_ELF_PAD: [u8; ELF_PAD] = [0; ELF_PAD];
 fn xmain() -> i32 {
     #[cfg(not(target_os = "vita"))]
     let args: Vec<String> = env::args().collect();
-    // En la Vita no hay línea de comandos: de momento arranca siempre en modo benchmark
-    #[cfg(target_os = "vita")]
+    // En la Vita no hay línea de comandos. Con gráficos (vitagl) se juega; sin ellos, benchmark.
+    #[cfg(all(target_os = "vita", feature = "vitagl"))]
+    let args: Vec<String> = vec!["gm8emulator".into(), format!("{VITA_DIR}/game.exe")];
+    #[cfg(all(target_os = "vita", not(feature = "vitagl")))]
     let args: Vec<String> = vec![
         "gm8emulator".into(),
         format!("{VITA_DIR}/game.exe"),

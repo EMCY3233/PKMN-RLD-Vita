@@ -23,6 +23,7 @@ vitagl = [
     "vitasdk-sys/SceGxm_stub", "vitasdk-sys/SceDisplay_stub", "vitasdk-sys/SceAppMgr_stub",
     "vitasdk-sys/SceCommonDialog_stub", "vitasdk-sys/SceKernelDmacMgr_stub", "vitasdk-sys/SceShaccCg_stub",
     "vitasdk-sys/SceSysmodule_stub", "vitasdk-sys/SceRazorCapture_stub", "vitasdk-sys/SceGpuEs4_stub",
+    "vitasdk-sys/SceCtrl_stub", "vitasdk-sys/SceTouch_stub",
 ]
 
 [build-dependencies]

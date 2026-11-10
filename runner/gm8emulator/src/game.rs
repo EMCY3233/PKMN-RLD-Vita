@@ -19,6 +19,8 @@ pub mod savestate;
 pub mod surface;
 pub mod transition;
 pub mod view;
+#[cfg(all(target_os = "vita", feature = "vitagl"))]
+pub mod vita_input;
 
 pub use background::Background;
 pub use replay::Replay;
@@ -242,6 +244,8 @@ pub struct Game {
     pub window_visible: bool,
     pub close_requested: bool,
     pub pending_keys: Vec<(u8, bool)>,
+    #[cfg(all(target_os = "vita", feature = "vitagl"))]
+    pub vita_input: Option<vita_input::VitaInput>,
     pub bench: Option<bench::Bench>,
     pub keyboard_string: gml::String,
     pub keyboard_lastchar: gml::String,
@@ -1419,6 +1423,8 @@ impl Game {
             window_icons,
             close_requested: false,
             pending_keys: Vec::new(),
+            #[cfg(all(target_os = "vita", feature = "vitagl"))]
+            vita_input: Some(vita_input::VitaInput::new(std::path::Path::new("ux0:data/reloaded"))),
             bench: None,
             keyboard_string: "".into(),
             keyboard_lastchar: "".into(),
@@ -1433,7 +1439,7 @@ impl Game {
             // lazy state
             window_caption: room1_caption.clone(),
             window_cursor_gml: gml::mappings::constants::CR_DEFAULT as _,
-            window_inner_size: (width, height),
+            window_inner_size: if cfg!(all(target_os = "vita", feature = "vitagl")) { (960, 544) } else { (width, height) },
             window_is_logical_dpi: false,
             window_offset_spoof: (0, 0),
             window_sizeable: settings.allow_resize,
@@ -2153,6 +2159,21 @@ impl Game {
         self.input.mouse_step();
         self.window.poll_events();
         self.bench_poll();
+        #[cfg(all(target_os = "vita", feature = "vitagl"))]
+        if let Some(mut vi) = self.vita_input.take() {
+            let win = (self.window_inner_size.0 as u32, self.window_inner_size.1 as u32);
+            for ev in vi.poll(win) {
+                match ev {
+                    vita_input::Out::Key(vk, down) => self.pending_keys.push((vk, down)),
+                    vita_input::Out::MouseMove(x, y) => self.input.mouse_move_to((x, y)),
+                    vita_input::Out::MouseButton(down) => {
+                        let mb = input::ramen2mb(ramen::input::MouseButton::Left);
+                        if down { self.input.mouse_press(mb, true) } else { self.input.mouse_release(mb, true) }
+                    },
+                }
+            }
+            self.vita_input = Some(vi);
+        }
         for (vk, down) in std::mem::take(&mut self.pending_keys) {
             if down { self.input.button_press(vk, true) } else { self.input.button_release(vk, true) }
         }

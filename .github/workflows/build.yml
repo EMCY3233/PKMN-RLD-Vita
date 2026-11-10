@@ -140,6 +140,13 @@ jobs:
               exit 1
             fi
           fi
+      - name: Identificador propio (se instala junto a la versión benchmark)
+        working-directory: runner/target/armv7-sony-vita-newlibeabihf/release
+        shell: bash
+        run: |
+          vita-mksfoex -s TITLE_ID=PKRLD0010 -d ATTRIBUTE2=12 "Pokemon Reloaded (prueba)" gl.sfo
+          vita-pack-vpk -s gl.sfo -b gm8emulator.self ReloadedGL.vpk
+          rm -f gm8emulator.vpk
       - uses: actions/upload-artifact@v4
         with:
           name: reloaded-runner-gl-vpk

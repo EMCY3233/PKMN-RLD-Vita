@@ -109,6 +109,10 @@ pub enum Cursor {
             self.events.clear();
             if let Ok(mut q) = PENDING.lock() { self.events.extend(q.drain(..)); }
         }
+        // En la consola la "ventana" es la pantalla entera (960×544)
+        #[cfg(target_os = "vita")]
+        pub fn size(&self) -> (u16, u16) { (960, 544) }
+        #[cfg(not(target_os = "vita"))]
         pub fn size(&self) -> (u16, u16) { self.size }
         pub fn set_cursor(&self, _: Cursor) {}
         pub fn set_borderless(&self, _: bool) {}
