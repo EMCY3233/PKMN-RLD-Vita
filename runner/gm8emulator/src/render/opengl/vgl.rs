@@ -48,16 +48,6 @@ unsafe fn bgra_to_rgba(format: GLenum, ty: GLenum, w: GLsizei, h: GLsizei, data:
 
 extern "C" {
     fn vglInitExtended(legacy_pool_size: c_int, width: c_int, height: c_int, ram_threshold: c_int, msaa: c_int) -> u8;
-    fn vglInitWithCustomSizes(
-        legacy_pool_size: c_int,
-        width: c_int,
-        height: c_int,
-        ram_pool_size: c_int,
-        cdram_pool_size: c_int,
-        phycont_pool_size: c_int,
-        cdlg_pool_size: c_int,
-        msaa: c_int,
-    ) -> u8;
     fn vglGetProcAddress(name: *const c_char) -> *mut c_void;
     fn vglSwapBuffers(has_commondialog: u8);
     fn vglWaitVblankStart(enable: u8);
@@ -235,36 +225,19 @@ impl PlatformImpl {
         if !shader_compiler_present() {
             crate::startlog("AVISO: no existe ur0:data/libshacccg.suprx (vitaGL no podrá compilar shaders)");
         }
-        // 1º: tamaños explícitos según la memoria libre (deja margen para el sistema)
+        // Ojo: vglInit* devuelve GL_TRUE solo si tuvo que bajar la resolución y GL_FALSE en un inicio
+        // normal (ver vgl.c: `return res_fallback;`). No es un indicador de error: si falla, vitaGL
+        // no vuelve. Un segundo intento tras un inicio correcto se rechaza ("already inited").
         let mb = 1024 * 1024;
-        let ram = (free.0 - 8 * mb).clamp(0, 48 * mb);
-        let cdram = (free.1 - 4 * mb).max(0);
-        let phy = (free.2 - 2 * mb).clamp(0, 16 * mb);
-        let mut ok = false;
-        if ram > 8 * mb && cdram > 16 * mb {
-            ok = vglInitWithCustomSizes(0, 960, 544, ram, cdram, phy, 0, 0) != 0;
-            crate::startlog(&format!(
-                "vglInitWithCustomSizes(ram {} MB, cdram {} MB, phycont {} MB): {}",
-                ram / mb,
-                cdram / mb,
-                phy / mb,
-                if ok { "OK" } else { "falló" }
-            ));
-        }
-        // 2º: inicio estándar dejando 8 MB de RAM libres
-        if !ok {
-            ok = vglInitExtended(0, 960, 544, 8 * mb, 0) != 0;
-            crate::startlog(&format!("vglInitExtended: {}", if ok { "OK" } else { "falló" }));
-        }
-        if !ok {
-            let f = free_memory();
-            return Err(format!(
-                "vitaGL no se pudo iniciar (libre: RAM {} MB, CDRAM {} MB, phycont {} MB)",
-                f.0 / mb,
-                f.1 / mb,
-                f.2 / mb
-            ))
-        }
+        let fallback = vglInitExtended(0, 960, 544, 16 * mb, 0) != 0;
+        let after = free_memory();
+        crate::startlog(&format!(
+            "vitaGL iniciado{} (libre después: RAM {} MB, CDRAM {} MB, phycont {} MB)",
+            if fallback { " con resolución reducida" } else { "" },
+            after.0 / mb,
+            after.1 / mb,
+            after.2 / mb
+        ));
         let load = |n: &str| {
             let c = CString::new(n).unwrap();
             let p = vglGetProcAddress(c.as_ptr());
@@ -283,7 +256,6 @@ impl PlatformImpl {
             framebuffer_texture_2d: std::mem::transmute(load("glFramebufferTexture2D")?),
             get_error: std::mem::transmute(load("glGetError")?),
         });
-        crate::startlog("vitaGL iniciado (960x544)");
         Ok(PlatformImpl { vsync: std::cell::Cell::new(1) })
     }
 
