@@ -1,9 +1,14 @@
+#[cfg(all(feature = "vita", not(feature = "desktop")))]
+extern crate ramen_vita as ramen;
+
 mod action;
 mod asset;
 mod game;
 mod gml;
 mod handleman;
+#[cfg(feature = "desktop")]
 mod imgui_key_utils;
+#[cfg(feature = "desktop")]
 mod imgui_utils;
 mod input;
 mod instance;
@@ -44,8 +49,29 @@ fn main() {
     process::exit(xmain());
 }
 
+/// Carpeta del juego en la PS Vita
+#[cfg(target_os = "vita")]
+const VITA_DIR: &str = "ux0:data/reloaded";
+
+/// Montón (heap) de newlib en PS Vita: cargar el juego necesita ~300 MB (por defecto solo hay 128 MB)
+#[cfg(target_os = "vita")]
+#[used]
+#[no_mangle]
+pub static _newlib_heap_size_user: u32 = 340 * 1024 * 1024;
+
 fn xmain() -> i32 {
+    #[cfg(not(target_os = "vita"))]
     let args: Vec<String> = env::args().collect();
+    // En la Vita no hay línea de comandos: de momento arranca siempre en modo benchmark
+    #[cfg(target_os = "vita")]
+    let args: Vec<String> = vec![
+        "gm8emulator".into(),
+        format!("{VITA_DIR}/game.exe"),
+        "--bench".into(),
+        "5400".into(),
+        "--bench-log".into(),
+        format!("{VITA_DIR}/bench.log"),
+    ];
     let process = args[0].clone();
 
     let mut opts = getopts::Options::new();
@@ -59,6 +85,8 @@ fn xmain() -> i32 {
     opts.optopt("n", "project-name", "name of TAS project to create or load", "NAME");
     opts.optopt("f", "replay-file", "path to savestate file to replay", "FILE");
     opts.optopt("o", "output-file", "output savestate name in replay mode", "FILE.bin");
+    opts.optopt("B", "bench", "benchmark: run N frames without frame limiter, with scripted inputs, and log FPS", "FRAMES");
+    opts.optopt("", "bench-log", "where to write the benchmark log (default: bench.log)", "FILE");
     opts.optmulti("a", "game-arg", "argument to pass to the game", "ARG");
     opts.optflagopt("p", "start-save", "Either loads the savestate specified after this parameter or starts at the first frame. If a .gmtas is specified by -f this will start the replay from this savestate instead", "savestate");
 
@@ -95,7 +123,9 @@ fn xmain() -> i32 {
             },
         })
         .unwrap_or(0);
-    let frame_limiter = !matches.opt_present("l");
+    let bench_frames = matches.opt_str("B").and_then(|f| f.parse::<u64>().ok());
+    let bench_log = matches.opt_str("bench-log").unwrap_or_else(|| "bench.log".into());
+    let frame_limiter = !matches.opt_present("l") && bench_frames.is_none();
     let verbose = matches.opt_present("v");
     let output_bin = matches.opt_str("o").map(PathBuf::from);
     let pause = matches.opt_present("p");
@@ -217,15 +247,18 @@ fn xmain() -> i32 {
         },
     };
 
+    // En algunas plataformas (PS Vita) canonicalize no está disponible: usar la ruta tal cual
     let absolute_path = match file_path.canonicalize() {
         Ok(p) => p,
+        Err(_) if file_path.is_absolute() || cfg!(target_os = "vita") => file_path.to_path_buf(),
         Err(e) => {
             eprintln!("Failed to resolve game path: {}", e);
             return EXIT_FAILURE;
         },
     };
 
-    let encoding = encoding_rs::SHIFT_JIS; // TODO: argument
+    // Pokémon Reloaded (y casi todos los juegos GM8 occidentales) usan la página de códigos de Windows-1252
+    let encoding = encoding_rs::WINDOWS_1252;
 
     let play_type = if project_path.is_some() {
         PlayType::Record
@@ -253,11 +286,18 @@ fn xmain() -> i32 {
         },
     };
 
+    if let Some(n) = bench_frames {
+        components.bench = Some(game::bench::Bench::new(n, &bench_log));
+    }
+
     let time_now = GameClock::SpoofedNanos(gml::datetime::now_as_nanos());
 
     if let Err(err) = if let Some(path) = project_path {
         components.clock = time_now;
+        #[cfg(feature = "desktop")]
         components.record(path, pause, start_save_path.as_ref());
+        #[cfg(not(feature = "desktop"))]
+        { let _ = (path, pause, start_save_path); eprintln!("El modo TAS solo existe en la versión de PC"); }
         Ok(())
     } else {
         // cache temp_dir and included files because the other functions take ownership

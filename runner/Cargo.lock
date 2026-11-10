@@ -393,6 +393,7 @@ dependencies = [
  "lzzzz",
  "phf",
  "ramen",
+ "ramen-vita",
  "rect_packer",
  "rmp3",
  "rust-ini",
@@ -545,7 +546,6 @@ dependencies = [
 [[package]]
 name = "libsoundio-sys"
 version = "0.3.0"
-source = "git+https://github.com/Adamcake/udon#1ae3cdce620acdaa7996315c05a98a0f12ed8745"
 dependencies = [
  "cc",
  "cmake",
@@ -808,6 +808,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ramen-vita"
+version = "0.1.0"
+
+[[package]]
 name = "rayon"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1043,7 +1047,6 @@ dependencies = [
 [[package]]
 name = "udon"
 version = "0.0.1"
-source = "git+https://github.com/Adamcake/udon#1ae3cdce620acdaa7996315c05a98a0f12ed8745"
 dependencies = [
  "libsoundio-sys",
  "serde",

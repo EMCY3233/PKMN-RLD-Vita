@@ -10,6 +10,8 @@ pub mod movement;
 pub mod particle;
 pub mod pathfinding;
 pub mod platform;
+pub mod bench;
+#[cfg(feature = "desktop")]
 pub mod recording;
 pub mod replay;
 pub mod savestate;
@@ -236,6 +238,7 @@ pub struct Game {
     pub window_visible: bool,
     pub close_requested: bool,
     pub pending_keys: Vec<(u8, bool)>,
+    pub bench: Option<bench::Bench>,
     pub keyboard_string: gml::String,
     pub keyboard_lastchar: gml::String,
     // Scaling type
@@ -600,7 +603,7 @@ impl Game {
         let window_icons = !settings.dont_show_buttons;
 
         let connection = ramen::connection::Connection::new()?;
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "desktop"))]
         unsafe {
             let display = connection.xdisplay();
             let screen = connection.xscreenid();
@@ -629,7 +632,7 @@ impl Game {
             });
 
         // if unix... pass visual...
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "desktop"))]
         unsafe {
             let glx = crate::render::opengl::glx::GLX.as_ref().unwrap();
             builder = builder.depth(glx.depth).visual(glx.visual);
@@ -1379,6 +1382,7 @@ impl Game {
             window_icons,
             close_requested: false,
             pending_keys: Vec::new(),
+            bench: None,
             keyboard_string: "".into(),
             keyboard_lastchar: "".into(),
             scaling,
@@ -2096,6 +2100,7 @@ impl Game {
     pub fn process_window_events(&mut self) {
         self.input.mouse_step();
         self.window.poll_events();
+        self.bench_poll();
         for (vk, down) in std::mem::take(&mut self.pending_keys) {
             if down { self.input.button_press(vk, true) } else { self.input.button_release(vk, true) }
         }
@@ -2250,6 +2255,9 @@ impl Game {
             self.process_window_events();
 
             self.frame()?;
+            if self.bench_tick() {
+                break Ok(());
+            }
 
             self.capture_recording_frame(&mut current_frame_time, self.room.speed);
             if let Some(SceneChange::End) = self.scene_change {

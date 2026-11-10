@@ -7,6 +7,8 @@ members = [
     "gm8decompiler",
     "gml-parser",
     "gm8exe",
+    "ramen-vita",
+    "udon",
 ]
 
 [profile.release]

@@ -1,7 +1,10 @@
 //! Game rendering functionality
 
 pub mod atlas;
+#[cfg(feature = "desktop")]
 pub mod opengl;
+#[cfg(not(feature = "desktop"))]
+pub mod null;
 
 use crate::types::Colour;
 use atlas::{AtlasRect, AtlasRef};
@@ -173,6 +176,35 @@ pub struct VertexBuffer {
     points: Vec<Vertex>,
     lines: Vec<Vertex>,
     tris: Vec<Vertex>,
+}
+
+// Utilidades compartidas por todos los renderizadores (antes en opengl.rs)
+pub fn split_colour(rgb: i32, alpha: f64) -> [f32; 4] {
+    [
+        ((rgb & 0xFF) as f32) / 255.0,
+        (((rgb >> 8) & 0xFF) as f32) / 255.0,
+        (((rgb >> 16) & 0xFF) as f32) / 255.0,
+        alpha.max(0.0).min(1.0) as f32,
+    ]
+}
+
+// TODO: probably put this in render.rs instead
+impl VertexBuffer {
+    pub fn swap_colour(&mut self, old: (i32, f64), new: (i32, f64)) {
+        let old = split_colour(old.0, old.1);
+        let new = split_colour(new.0, new.1);
+        for vert in self.points.iter_mut().chain(&mut self.lines).chain(&mut self.tris) {
+            if vert.blend == old {
+                vert.blend = new;
+            }
+        }
+    }
+}
+
+impl From<AtlasRect> for [f32; 4] {
+    fn from(ar: AtlasRect) -> Self {
+        [ar.x as f32, ar.y as f32, ar.w as f32, ar.h as f32]
+    }
 }
 
 pub struct Renderer(Box<dyn RendererTrait>);
@@ -553,9 +585,15 @@ impl Default for RendererOptions {
 
 impl Renderer {
     pub fn new(backend: (), connection: &Connection, options: &RendererOptions, window: &Window, clear_colour: Colour) -> Result<Self, String> {
-        Ok(Self(Box::new(match backend {
+        #[cfg(feature = "desktop")]
+        return Ok(Self(Box::new(match backend {
             () => opengl::RendererImpl::new(options, connection, window, clear_colour)?,
-        })))
+        })));
+        #[cfg(not(feature = "desktop"))]
+        {
+            let _ = (backend, connection, window, clear_colour);
+            Ok(Self(Box::new(null::RendererImpl::new(options))))
+        }
     }
 
     pub fn max_texture_size(&self) -> u32 {

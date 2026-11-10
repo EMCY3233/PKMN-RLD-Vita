@@ -51,3 +51,27 @@ jobs:
         with:
           name: reloaded-loader-test-vpk
           path: vita/loader-test/target/armv7-sony-vita-newlibeabihf/release/*.vpk
+
+  vita-runner-bench:
+    name: Runner Vita (benchmark)
+    runs-on: ubuntu-24.04
+    container: vitasdk/vitasdk:latest
+    steps:
+      - name: Herramientas base
+        run: apk add --no-cache git curl bash build-base cmake || (apt-get update && apt-get install -y git curl build-essential cmake)
+      - uses: actions/checkout@v4
+      - name: Rust nightly + cargo-vita
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Instalar cargo-vita
+        run: cargo install cargo-vita --locked
+      - name: Compilar VPK del runner (modo benchmark)
+        working-directory: runner/gm8emulator
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: cargo vita build vpk --release -- --no-default-features --features vita
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-runner-bench-vpk
+          path: runner/target/armv7-sony-vita-newlibeabihf/release/*.vpk

@@ -847,6 +847,7 @@ impl TryFrom<ramen::input::Key> for Button {
     }
 }
 
+#[cfg(feature = "desktop")]
 pub fn ramen2imgui(key: ramen::input::Key) -> Option<imgui::Key> {
     match key {
         // ramen::input::Key::Attn => Some(imgui::Key::Attn),

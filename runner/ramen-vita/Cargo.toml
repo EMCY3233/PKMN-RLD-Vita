@@ -1,0 +1,8 @@
+[package]
+name = "ramen-vita"
+version = "0.1.0"
+edition = "2021"
+license = "Zlib"
+description = "Sustituto mínimo de la API de ramen (ventana/eventos) para plataformas sin ventanas, como PS Vita"
+
+[dependencies]

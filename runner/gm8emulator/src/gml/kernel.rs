@@ -5802,7 +5802,10 @@ impl Game {
                 let duration = std::time::Duration::from_millis(millis);
                 match self.play_type {
                     PlayType::Normal => {
-                        datetime::sleep(duration);
+                        // En modo benchmark no se duerme: se mide solo el cálculo
+                        if self.bench.is_none() {
+                            datetime::sleep(duration);
+                        }
                         self.process_window_events();
                     },
                     PlayType::Record => (),
@@ -7319,7 +7322,9 @@ impl Game {
         if self.play_type == PlayType::Normal {
             self.input.set_keyboard_lastkey(0);
             while self.input.keyboard_lastkey() == 0 {
-                datetime::sleep(std::time::Duration::from_millis(50));
+                if self.bench.is_none() {
+                    datetime::sleep(std::time::Duration::from_millis(50));
+                }
                 self.process_window_events();
             }
         }
@@ -7730,9 +7735,13 @@ impl Game {
             {
                 self.window.hwnd() as u64 as f64
             }
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "desktop"))]
             {
                 self.window.xid()
+            }
+            #[cfg(not(any(target_os = "windows", all(unix, feature = "desktop"))))]
+            {
+                0.0
             }
         }.into())
     }
@@ -9130,7 +9139,7 @@ impl Game {
 
     pub fn sound_add(&mut self, args: &[Value]) -> gml::Result<Value> {
         let (fname, kind, preload) = expect_args!(args, [string, int, bool])?;
-        let path_buf = std::path::PathBuf::from(fname.as_ref());
+        let path_buf = std::path::PathBuf::from(file::to_path(fname.as_ref()).as_ref());
         let data = match std::fs::read(&path_buf) {
             Ok(b) => b.into_boxed_slice(),
             Err(_) => return Ok((-1).into()),
@@ -9164,12 +9173,16 @@ impl Game {
             sound.gml_preload = f64::from(u8::from(preload)).into();
 
             if matches!(sound.handle, asset::sound::FileType::None) {
-                let path_buf = std::path::PathBuf::from(fname.as_ref());
+                let path_buf = std::path::PathBuf::from(file::to_path(fname.as_ref()).as_ref());
                 let data = match std::fs::read(&path_buf) {
                     Ok(b) => b.into_boxed_slice(),
                     Err(_) => return Ok(0.into()),
                 };
-                sound.handle = match path_buf.extension().and_then(std::ffi::OsStr::to_str) {
+                let ext = path_buf.extension().and_then(std::ffi::OsStr::to_str).map(|e| e.to_ascii_lowercase());
+                sound.handle = match ext.as_deref() {
+                    // MIDI no está soportado: se acepta en silencio para que el juego no muestre errores
+                    // (en el port los MIDI se convierten a MP3 con update_port.sh)
+                    Some("mid") | Some("midi") => return Ok(1.into()),
                     Some("mp3") => match self.audio.add_mp3(data, sound_id as i32) {
                         Some(x) => asset::sound::FileType::Mp3(x),
                         None => return Ok(0.into()),
@@ -9342,6 +9355,11 @@ impl Game {
         if let Some(script_id) = args.get(0) {
             let script_id = script_id.round();
             if let Some(script) = self.assets.scripts.get_asset(script_id) {
+                // Depuración: RLD_TRACE=1 imprime cada script llamado vía script_execute
+                static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *TRACE.get_or_init(|| std::env::var_os("RLD_TRACE").is_some()) {
+                    eprintln!("[script] {} {} {:?}", script_id, String::from_utf8_lossy(script.name.as_ref()), &args[1..args.len().min(4)]);
+                }
                 let instructions = script.compiled.clone();
                 let mut new_args: [Value; 16] = Default::default();
                 for (src, dest) in args[1..].iter().zip(new_args.iter_mut()) {
