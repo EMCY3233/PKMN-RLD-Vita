@@ -16,8 +16,30 @@ fn epoch() -> PrimitiveDateTime {
 }
 
 fn now() -> time::OffsetDateTime {
-    OffsetDateTime::now_utc()
-        + time::Duration::seconds(UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC).whole_seconds().into())
+    OffsetDateTime::now_utc() + time::Duration::seconds(local_offset_secs())
+}
+
+/// Diferencia entre la hora local y UTC. En PS Vita la crate `time` no conoce la zona horaria
+/// (devolvería UTC: el ciclo día/noche y los eventos diarios del juego irían desfasados),
+/// así que se pregunta al reloj del sistema.
+#[cfg(target_os = "vita")]
+pub fn local_offset_secs() -> i64 {
+    use vitasdk_sys::{sceRtcConvertUtcToLocalTime, sceRtcGetCurrentTick, SceRtcTick};
+    let mut utc = SceRtcTick { tick: 0 };
+    let mut local = SceRtcTick { tick: 0 };
+    unsafe {
+        if sceRtcGetCurrentTick(&mut utc) < 0 || sceRtcConvertUtcToLocalTime(&utc, &mut local) < 0 {
+            return 0
+        }
+    }
+    // ticks en microsegundos; redondeo al minuto
+    let diff = local.tick as i64 - utc.tick as i64;
+    (diff / 1_000_000 + 30).div_euclid(60) * 60
+}
+
+#[cfg(not(target_os = "vita"))]
+pub fn local_offset_secs() -> i64 {
+    UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC).whole_seconds().into()
 }
 
 pub fn now_as_nanos() -> u128 {

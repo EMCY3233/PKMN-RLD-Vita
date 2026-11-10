@@ -484,6 +484,7 @@ impl crate::game::Game {
         let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|e| format!("ERROR {e}"));
         log(&format!("Diagnóstico: carpeta actual (working_directory) = '{}'", cwd));
         log(&format!("Diagnóstico: program_directory = '{}'", String::from_utf8_lossy(self.program_directory.as_ref())));
+        log(&format!("Diagnóstico: zona horaria = UTC{:+} min (día/noche del juego)", crate::gml::datetime::local_offset_secs() / 60));
         log(&format!("Diagnóstico: temp_directory = '{}'", String::from_utf8_lossy(self.temp_directory.as_ref())));
         // como ImportBattlePokemon: working_directory + "\data\pkmnbattle\P1_2.gmspr"
         for p in [format!("{}\\data\\pkmnbattle\\P1_2.gmspr", cwd), "data\\text\\es\\txt_menu.dll".to_string()] {

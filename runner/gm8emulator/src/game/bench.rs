@@ -30,6 +30,9 @@ pub struct Bench {
     /// Acumulado de todo el recorrido (RLD_PROFILE=1)
     prof_total: std::collections::HashMap<ProfKey, (u64, f64)>,
     pub prof_all: bool,
+    /// RLD_GOTO=<sala>: tras llegar a la casa (sala 10) saltar a esa sala (pruebas de minijuegos)
+    goto: Option<i32>,
+    home_frames: u64,
 }
 
 /// Qué se está midiendo: una script (por id) o una función interna del motor (por dirección)
@@ -58,6 +61,8 @@ impl Bench {
             prof_self: Default::default(),
             prof_total: Default::default(),
             prof_all: std::env::var_os("RLD_PROFILE").is_some(),
+            goto: std::env::var("RLD_GOTO").ok().and_then(|v| v.parse().ok()),
+            home_frames: 0,
         };
         b.line(&format!("Benchmark del runner - plataforma: {} - {} fotogramas", std::env::consts::OS, max_frames));
         b.line("seg_real | fotogramas | FPS | peor_fotograma_ms | sala | instancias");
@@ -182,6 +187,16 @@ impl Game {
             b.rooms_seen.push(self.room.id);
             let name = self.assets.rooms.get_asset(self.room.id).map(|r| self.decode_str(r.name.as_ref()).into_owned()).unwrap_or_default();
             b.line(&format!("-> entra en sala {} '{}' (fotograma {}, velocidad de sala {})", self.room.id, name, b.frame, self.room.speed));
+        }
+        if let Some(target) = b.goto {
+            if self.room.id == 10 {
+                b.home_frames += 1;
+                if b.home_frames == 90 {
+                    b.line(&format!("-> RLD_GOTO: saltando a la sala {}", target));
+                    self.scene_change = Some(crate::game::SceneChange::Room(target));
+                    b.goto = None;
+                }
+            }
         }
         let speed = self.room.speed.max(1) as u64;
         if b.window_frames >= speed || now.duration_since(b.window_start).as_secs() >= 10 {
