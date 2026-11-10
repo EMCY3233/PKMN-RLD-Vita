@@ -651,7 +651,10 @@ impl Game {
                     }
 
                     let mut new_context = Context::copy_with_args(context, arg_values, args.len());
-                    self.execute(&instructions, &mut new_context)?;
+                    self.bench_enter(*script_id);
+                    let r = self.execute(&instructions, &mut new_context);
+                    self.bench_exit();
+                    r?;
                     Ok(new_context.return_value)
                 } else {
                     Err(Error::NonexistentAsset(asset::Type::Script, *script_id as i32))

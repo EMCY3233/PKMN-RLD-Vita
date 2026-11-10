@@ -9366,7 +9366,10 @@ impl Game {
                     *dest = src.clone();
                 }
                 let mut new_context = Context::copy_with_args(context, new_args, args.len() - 1);
-                self.execute(&instructions, &mut new_context)?;
+                self.bench_enter(script_id as usize);
+                let r = self.execute(&instructions, &mut new_context);
+                self.bench_exit();
+                r?;
                 Ok(new_context.return_value)
             } else {
                 Err(gml::Error::NonexistentAsset(asset::Type::Script, script_id))

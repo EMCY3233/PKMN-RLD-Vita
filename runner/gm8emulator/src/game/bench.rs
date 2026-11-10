@@ -24,6 +24,9 @@ pub struct Bench {
     log: Option<File>,
     rooms_seen: Vec<i32>,
     polls: u64,
+    /// Perfilado por script: pila de (script, inicio, tiempo en hijas) y tiempo propio acumulado
+    prof_stack: Vec<(usize, Instant, f64)>,
+    prof_self: std::collections::HashMap<usize, (u32, f64)>,
 }
 
 impl Bench {
@@ -41,6 +44,8 @@ impl Bench {
             log,
             rooms_seen: Vec::new(),
             polls: 0,
+            prof_stack: Vec::new(),
+            prof_self: Default::default(),
         };
         b.line(&format!("Benchmark del runner - plataforma: {} - {} fotogramas", std::env::consts::OS, max_frames));
         b.line("seg_real | fotogramas | FPS | peor_fotograma_ms | sala | instancias");
@@ -57,6 +62,28 @@ impl Bench {
 }
 
 impl Game {
+    /// Entrada en una script (solo cuenta en modo benchmark)
+    pub fn bench_enter(&mut self, id: usize) {
+        if let Some(b) = self.bench.as_mut() {
+            b.prof_stack.push((id, Instant::now(), 0.0));
+        }
+    }
+
+    /// Salida de la script más reciente: acumula su tiempo propio (sin contar las que llamó)
+    pub fn bench_exit(&mut self) {
+        if let Some(b) = self.bench.as_mut() {
+            if let Some((id, start, child)) = b.prof_stack.pop() {
+                let total = start.elapsed().as_secs_f64();
+                let e = b.prof_self.entry(id).or_insert((0, 0.0));
+                e.0 += 1;
+                e.1 += (total - child).max(0.0);
+                if let Some(parent) = b.prof_stack.last_mut() {
+                    parent.2 += total;
+                }
+            }
+        }
+    }
+
     /// Pulsaciones simuladas (pasar menús, nombre, diálogos). Se llama en cada sondeo de entrada:
     /// una vez por fotograma y también dentro de los bucles modales del juego (io_handle, sleep,
     /// keyboard_wait), que de otro modo esperarían eternamente una tecla dentro del mismo fotograma.
@@ -94,6 +121,21 @@ impl Game {
         if b.frame > 0 && ms > b.worst_frame_ms {
             b.worst_frame_ms = ms;
         }
+        // Fotograma lento (>1 s): apuntar las scripts que más tiempo propio consumieron
+        static SLOW_MS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        let slow = *SLOW_MS.get_or_init(|| std::env::var("RLD_SLOW_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000.0));
+        if b.frame > 0 && ms > slow {
+            let mut v: Vec<_> = b.prof_self.iter().map(|(k, v)| (*k, *v)).collect();
+            v.sort_by(|a, b| b.1 .1.partial_cmp(&a.1 .1).unwrap_or(std::cmp::Ordering::Equal));
+            let total: f64 = v.iter().map(|x| x.1 .1).sum();
+            let mut line = format!("   lento: fotograma {} de {:.0} ms (scripts {:.0} ms) ->", b.frame + 1, ms, total * 1000.0);
+            for (id, (calls, secs)) in v.iter().take(5) {
+                let name = self.assets.scripts.get(*id).and_then(|s| s.as_ref()).map(|s| String::from_utf8_lossy(s.name.as_ref()).into_owned()).unwrap_or_default();
+                line.push_str(&format!(" {}({}x) {:.0}ms;", name, calls, secs * 1000.0));
+            }
+            b.line(&line);
+        }
+        b.prof_self.clear();
         b.frame += 1;
         b.window_frames += 1;
         if !b.rooms_seen.contains(&self.room.id) {
