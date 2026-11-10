@@ -260,6 +260,13 @@ fn xmain() -> i32 {
     // Pokémon Reloaded (y casi todos los juegos GM8 occidentales) usan la página de códigos de Windows-1252
     let encoding = encoding_rs::WINDOWS_1252;
 
+    // Carpeta del juego: rutas relativas del juego ("data\\...") y reloaded.pak se resuelven desde aquí
+    if let Some(dir) = absolute_path.parent() {
+        #[cfg(target_os = "vita")]
+        let _ = env::set_current_dir(dir);
+        gml::pak::init(dir);
+    }
+
     let play_type = if project_path.is_some() {
         PlayType::Record
     } else if replay.is_some() {

@@ -6,6 +6,7 @@ pub mod file;
 pub mod kernel;
 pub mod mappings;
 pub mod network;
+pub mod pak;
 pub mod rand;
 pub mod runtime;
 pub mod string;

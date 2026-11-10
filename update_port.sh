@@ -51,4 +51,8 @@ if [ -n "$PREV" ] && [ -d "$ROOT/versions/$PREV/gml" ]; then
        <(sed 's/;/;\n/g' "$W/gml/scripts/DefaultKeyAssignment.gml") > "$W/CAMBIOS_TECLAS.diff" \
     && echo "Teclas: sin cambios" | tee -a "$R" || echo "¡ATENCIÓN! Cambios en teclas -> revisar vita/keymap.ini (CAMBIOS_TECLAS.diff)" | tee -a "$R"
 fi
-echo "Listo. Copia $OUT y game.exe a ux0:data/reloaded/ en la Vita."
+echo "== Empaquetando data/ en reloaded.pak"
+python3 -I "$ROOT/tools/rldpak.py" pack "$W/game" "$W/reloaded.pak"
+mkdir -p "$W/vita" && cp "$EXE" "$W/vita/game.exe" && mv "$W/reloaded.pak" "$W/vita/"
+(cd "$W/vita" && rm -f "../Reloaded_Vita_$VER.zip" && zip -q -0 "../Reloaded_Vita_$VER.zip" reloaded.pak && zip -q -9 "../Reloaded_Vita_$VER.zip" game.exe)
+echo "Listo: $W/Reloaded_Vita_$VER.zip -> extraer en ux0:data/reloaded/ (game.exe + reloaded.pak)"

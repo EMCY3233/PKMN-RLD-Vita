@@ -7,14 +7,56 @@ use std::{
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+use super::pak;
+
+/// Origen de lectura: archivo en disco o contenido extraído de reloaded.pak
+#[derive(Debug)]
+pub enum RFile {
+    Disk(File),
+    Mem(io::Cursor<Vec<u8>>),
+}
+impl Read for RFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self { Self::Disk(f) => f.read(buf), Self::Mem(c) => c.read(buf) }
+    }
+}
+impl Seek for RFile {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match self { Self::Disk(f) => f.seek(pos), Self::Mem(c) => c.seek(pos) }
+    }
+}
+
+/// Abre para lectura: disco primero, paquete después
+fn open_read(path: &str) -> io::Result<RFile> {
+    match File::open(path) {
+        Ok(f) => Ok(RFile::Disk(f)),
+        Err(e) => pak::read(path).map(|b| RFile::Mem(io::Cursor::new(b))).ok_or(e),
+    }
+}
+
+/// Con los datos en reloaded.pak, carpetas como data/partidas no existen en disco hasta que el
+/// juego escribe en ellas: se crean al vuelo (como si siempre hubieran estado ahí).
+fn ensure_parent(path: &str) {
+    if let Some(parent) = Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+}
+
+/// Lee un archivo entero (disco o paquete)
+pub fn read_any(path: &str) -> io::Result<Vec<u8>> {
+    pak::read_any(path)
+}
+
 #[derive(Debug)]
 pub enum TextHandle {
-    Read(BufReader<File>),
+    Read(BufReader<RFile>),
     Write(BufWriter<File>),
 }
 #[derive(Debug)]
 pub enum BinaryHandle {
-    Read(BufReader<File>),
+    Read(BufReader<RFile>),
     Write(BufWriter<File>),
     ReadWrite(File),
 }
@@ -105,6 +147,10 @@ impl TextHandle {
             AccessMode::Special => (false, true,  true ),
         };
 
+        if read {
+            return Ok(TextHandle::Read(BufReader::new(open_read(path)?)));
+        }
+        ensure_parent(path);
         let file = OpenOptions::new()
             .create(!read)
             .read(read)
@@ -114,12 +160,12 @@ impl TextHandle {
             .open(path)?;
 
         Ok(match mode {
-            AccessMode::Read => TextHandle::Read(BufReader::new(file)),
+            AccessMode::Read => TextHandle::Read(BufReader::new(RFile::Disk(file))),
             AccessMode::Write | AccessMode::Special => TextHandle::Write(BufWriter::new(file)),
         })
     }
 
-    fn get_reader(&mut self) -> Result<&mut BufReader<File>> {
+    fn get_reader(&mut self) -> Result<&mut BufReader<RFile>> {
         match self {
             Self::Read(f) => Ok(f),
             _ => Err(Error::CantRead),
@@ -201,9 +247,15 @@ impl TextHandle {
 
 impl BinaryHandle {
     pub fn open(path: &str, mode: AccessMode) -> io::Result<Self> {
+        // Solo lectura de un archivo que no está en disco pero sí en el paquete: leer del paquete
+        if matches!(mode, AccessMode::Read) && !Path::new(path).is_file() {
+            if let Some(b) = pak::read(path) {
+                return Ok(Self::Read(BufReader::new(RFile::Mem(io::Cursor::new(b)))));
+            }
+        }
         let file = Self::_open(path, mode)?;
         match mode {
-            AccessMode::Read => Ok(Self::Read(BufReader::new(file))),
+            AccessMode::Read => Ok(Self::Read(BufReader::new(RFile::Disk(file)))),
             AccessMode::Write => Ok(Self::Write(BufWriter::new(file))),
             AccessMode::Special => Ok(Self::ReadWrite(file)),
         }
@@ -219,6 +271,7 @@ impl BinaryHandle {
     // function call every time. Instead, when a read-only or write-only mode was
     // requested for a file, we try first to create it and fail if it's exists.
     fn _open(path: &str, mode: AccessMode) -> io::Result<File> {
+        ensure_parent(path);
         let mut opts = OpenOptions::new();
 
         #[rustfmt::skip]
@@ -381,7 +434,7 @@ pub fn skip_line(f: impl Read) -> io::Result<()> {
 }
 
 pub fn file_exists(path: &str) -> bool {
-    Path::new(path).is_file()
+    Path::new(path).is_file() || pak::exists(path)
 }
 
 pub fn rename(from: &str, to: &str) -> Result<()> {
@@ -397,7 +450,7 @@ pub fn copy(from: &str, to: &str) -> Result<()> {
 }
 
 pub fn dir_exists(path: &str) -> bool {
-    Path::new(path).is_dir()
+    Path::new(path).is_dir() || pak::dir_exists(path)
 }
 
 pub fn dir_create(path: &str) -> Result<()> {
@@ -413,12 +466,14 @@ pub fn delete(path: &str) -> Result<()> {
 }
 
 pub fn load_image(path: &str) -> Result<RgbaImage> {
-    Ok(image::open(path)?.into_rgba8())
+    let bytes = read_any(path)?;
+    let fmt = ImageFormat::from_path(path).or_else(|_| image::guess_format(&bytes))?;
+    Ok(image::load_from_memory_with_format(&bytes, fmt)?.into_rgba8())
 }
 
 pub fn load_animation(path: &str, imgnumb: usize) -> Result<Vec<RgbaImage>> {
     if ImageFormat::from_path(path)? == ImageFormat::Gif {
-        GifDecoder::new(BufReader::new(File::open(path)?))?
+        GifDecoder::new(BufReader::new(open_read(path)?))?
             .into_frames()
             .map(|r| r.map(|f| f.into_buffer()).map_err(Error::from))
             .collect()
@@ -446,6 +501,7 @@ pub fn load_animation(path: &str, imgnumb: usize) -> Result<Vec<RgbaImage>> {
 }
 
 pub fn save_image<P: AsRef<Path>>(path: P, image: RgbaImage) -> Result<()> {
+    ensure_parent(&path.as_ref().to_string_lossy());
     // save to png if the filename is .png otherwise bmp regardless of filename
     if path.as_ref().extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("png")).unwrap_or(false) {
         image.save_with_format(path, ImageFormat::Png)?;

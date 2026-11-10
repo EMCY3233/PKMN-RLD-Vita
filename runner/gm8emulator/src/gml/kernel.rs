@@ -9140,7 +9140,7 @@ impl Game {
     pub fn sound_add(&mut self, args: &[Value]) -> gml::Result<Value> {
         let (fname, kind, preload) = expect_args!(args, [string, int, bool])?;
         let path_buf = std::path::PathBuf::from(file::to_path(fname.as_ref()).as_ref());
-        let data = match std::fs::read(&path_buf) {
+        let data = match file::read_any(&path_buf.to_string_lossy()) {
             Ok(b) => b.into_boxed_slice(),
             Err(_) => return Ok((-1).into()),
         };
@@ -9174,7 +9174,7 @@ impl Game {
 
             if matches!(sound.handle, asset::sound::FileType::None) {
                 let path_buf = std::path::PathBuf::from(file::to_path(fname.as_ref()).as_ref());
-                let data = match std::fs::read(&path_buf) {
+                let data = match file::read_any(&path_buf.to_string_lossy()) {
                     Ok(b) => b.into_boxed_slice(),
                     Err(_) => return Ok(0.into()),
                 };
