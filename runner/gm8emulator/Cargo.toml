@@ -8,7 +8,7 @@ rust-version = "1.77"
 default-run = "gm8emulator"
 
 [package.metadata.vita]
-title_id = "PKRLD0002"
+title_id = "PKRLD0003"
 title_name = "Reloaded Runner Bench"
 
 [features]
