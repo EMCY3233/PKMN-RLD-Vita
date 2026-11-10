@@ -9,7 +9,8 @@ use serde::{
     ser::{SerializeSeq, SerializeStruct},
     Deserialize, Deserializer, Serialize, Serializer,
 };
-use std::{collections::HashMap, fmt};
+use crate::util::FastHashMap;
+use std::fmt;
 
 /// Elements per Chunk (fixed size).
 const CHUNK_SIZE: usize = 256;
@@ -160,8 +161,8 @@ fn nb_coll_iter_advance<T: Copy>(coll: &[T], idx: &mut usize) -> Option<T> {
 pub struct InstanceList {
     chunks: ChunkList<Instance>,
     draw_order: Vec<usize>,
-    object_id_map: HashMap<ID, Vec<usize>>, // Object ID <-> Count
-    object_id_map_inherit: HashMap<ID, Vec<usize>>,
+    object_id_map: FastHashMap<ID, Vec<usize>>, // Object ID <-> Count
+    object_id_map_inherit: FastHashMap<ID, Vec<usize>>,
 }
 
 // generic purpose non-borrowing iterators
@@ -223,8 +224,8 @@ impl InstanceList {
         Self {
             chunks: ChunkList::new(),
             draw_order: Vec::new(),
-            object_id_map: HashMap::new(),
-            object_id_map_inherit: HashMap::new(),
+            object_id_map: FastHashMap::default(),
+            object_id_map_inherit: FastHashMap::default(),
         }
     }
 
@@ -550,8 +551,8 @@ fn defrag(list: &[usize]) -> Vec<usize> {
     output
 }
 
-fn defrag_map(map: &HashMap<i32, Vec<usize>>, all_insts: &[usize]) -> HashMap<i32, Vec<usize>> {
-    let mut output = HashMap::new();
+fn defrag_map(map: &FastHashMap<i32, Vec<usize>>, all_insts: &[usize]) -> FastHashMap<i32, Vec<usize>> {
+    let mut output = FastHashMap::default();
     for (obj_id, in_vec) in map.iter() {
         let mut out_vec = Vec::with_capacity(in_vec.len());
         for i in in_vec.iter() {

@@ -77,7 +77,34 @@ impl Game {
                 }
             };
 
-            self.execute_tree(event, instance, other, event_id, event_sub as _, object_id)
+            let res = self.execute_tree(event, instance, other, event_id, event_sub as _, object_id);
+            match res {
+                Err(e) if self.errors_continue && !matches!(e, gml::Error::EndOfRoomOrder) => {
+                    // GM8 (sin "Abortar en todos los errores") muestra el error y deja seguir: aquí se
+                    // apunta en runner.log y se abandona solo este evento.
+                    self.errors_logged += 1;
+                    if self.errors_logged <= 200 {
+                        let obj = self
+                            .assets
+                            .objects
+                            .get_asset(object_id)
+                            .map(|o| self.decode_str(o.name.as_ref()).into_owned())
+                            .unwrap_or_default();
+                        let room = self
+                            .assets
+                            .rooms
+                            .get_asset(self.room.id)
+                            .map(|r| self.decode_str(r.name.as_ref()).into_owned())
+                            .unwrap_or_default();
+                        crate::startlog(&format!(
+                            "Error del juego ignorado (como GM8): {} [objeto {}, evento {}/{}, sala {}]",
+                            e, obj, event_id, event_sub, room
+                        ));
+                    }
+                    Ok(())
+                },
+                r => r,
+            }
         } else {
             Ok(())
         }

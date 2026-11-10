@@ -1,3 +1,4 @@
+use crate::util::FastHashMap;
 use crate::{
     asset::{Object, Sprite},
     gml::{InstanceVariable, Value},
@@ -80,8 +81,8 @@ pub struct Instance {
     pub bbox_bottom: Cell<i32>,
     pub bbox_is_stale: Cell<bool>,
 
-    pub fields: RefCell<HashMap<usize, Field>>,
-    pub alarms: RefCell<HashMap<u32, i32>>,
+    pub fields: RefCell<FastHashMap<usize, Field>>,
+    pub alarms: RefCell<FastHashMap<u32, i32>>,
 
     pub parents: Rc<RefCell<HashSet<i32>>>,
 }
@@ -89,13 +90,13 @@ pub struct Instance {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Field {
     Single(Value),
-    Array(HashMap<u32, Value>),
+    Array(FastHashMap<u32, Value>),
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DummyFieldHolder {
-    pub fields: HashMap<usize, Field>,
-    pub vars: HashMap<InstanceVariable, Field>,
+    pub fields: FastHashMap<usize, Field>,
+    pub vars: FastHashMap<InstanceVariable, Field>,
 }
 
 impl Instance {
@@ -191,8 +192,8 @@ impl Instance {
             bbox_right: Cell::new(BBOX_DEFAULT),
             bbox_bottom: Cell::new(BBOX_DEFAULT),
             bbox_is_stale: Cell::new(true),
-            fields: RefCell::new(HashMap::new()),
-            alarms: RefCell::new(HashMap::new()),
+            fields: RefCell::new(FastHashMap::default()),
+            alarms: RefCell::new(FastHashMap::default()),
         }
     }
 
@@ -369,7 +370,7 @@ impl Field {
         match index {
             0 => Self::Single(value),
             i => {
-                let mut array = HashMap::new();
+                let mut array = FastHashMap::default();
                 array.insert(i, value);
                 Self::Array(array)
             },
@@ -400,7 +401,7 @@ impl Field {
                     *v = value;
                 },
                 i => {
-                    let mut array = HashMap::with_capacity(2);
+                    let mut array = FastHashMap::with_capacity_and_hasher(2, Default::default());
                     array.insert(0, v.clone());
                     array.insert(i, value);
                     *self = Self::Array(array);
@@ -415,6 +416,6 @@ impl Field {
 
 impl DummyFieldHolder {
     pub fn new() -> Self {
-        Self { fields: HashMap::new(), vars: HashMap::new() }
+        Self { fields: FastHashMap::default(), vars: FastHashMap::default() }
     }
 }

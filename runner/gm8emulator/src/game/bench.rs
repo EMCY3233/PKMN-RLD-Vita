@@ -26,9 +26,9 @@ pub struct Bench {
     polls: u64,
     /// Perfilado por script: pila de (script, inicio, tiempo en hijas) y tiempo propio acumulado
     prof_stack: Vec<(ProfKey, Instant, f64)>,
-    prof_self: std::collections::HashMap<ProfKey, (u32, f64)>,
+    prof_self: crate::util::FastHashMap<ProfKey, (u32, f64)>,
     /// Acumulado de todo el recorrido (RLD_PROFILE=1)
-    prof_total: std::collections::HashMap<ProfKey, (u64, f64)>,
+    prof_total: crate::util::FastHashMap<ProfKey, (u64, f64)>,
     pub prof_all: bool,
     /// RLD_GOTO=<sala>: tras llegar a la casa (sala 10) saltar a esa sala (pruebas de minijuegos)
     goto: Option<i32>,
@@ -136,6 +136,10 @@ impl Game {
     /// Las teclas simuladas no escriben texto, así que los campos de nombre se aceptan por defecto.
     pub fn bench_poll(&mut self) {
         let Some(b) = self.bench.as_mut() else { return };
+        // RLD_GOTO_IDLE=1: una vez hecho el salto de RLD_GOTO, no pulsar nada (medir la sala quieta)
+        if b.goto.is_none() && b.home_frames > 0 && std::env::var_os("RLD_GOTO_IDLE").is_some() {
+            return
+        }
         b.polls += 1;
         let frame = b.polls;
         let press = |g: &mut Game, vk: u8| g.pending_keys.push((vk, true));
@@ -195,6 +199,9 @@ impl Game {
                     b.line(&format!("-> RLD_GOTO: saltando a la sala {}", target));
                     self.scene_change = Some(crate::game::SceneChange::Room(target));
                     b.goto = None;
+                    for vk in [VK_Z, VK_X, VK_RETURN, VK_DOWN] {
+                        self.pending_keys.push((vk, false));
+                    }
                 }
             }
         }

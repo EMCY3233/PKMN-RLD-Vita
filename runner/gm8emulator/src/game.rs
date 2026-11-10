@@ -128,7 +128,7 @@ pub struct Game {
     pub rand: Random,
     pub input: Input,
     pub assets: Assets,
-    pub event_holders: [IndexMap<u32, Rc<RefCell<Vec<ID>>>>; 12],
+    pub event_holders: [crate::util::FastIndexMap<u32, Rc<RefCell<Vec<ID>>>>; 12],
     pub custom_draw_objects: HashSet<ID>,
 
     pub renderer: Renderer,
@@ -179,6 +179,9 @@ pub struct Game {
     pub model_matrix_stack: Vec<[f32; 16]>,
     pub auto_draw: bool,
     pub uninit_fields_are_zero: bool,
+    /// Errores de ejecución: registrar y seguir (como "Ignorar" en GM8) en vez de cerrar el juego
+    pub errors_continue: bool,
+    pub errors_logged: u32,
     pub uninit_args_are_zero: bool,
     pub swap_creation_events: bool,
 
@@ -1089,7 +1092,7 @@ impl Game {
                         None => None,
                     });
                     o.map(|b| {
-                        let mut events: [HashMap<u32, Rc<RefCell<Tree>>>; 12] = std::default::Default::default();
+                        let mut events: [crate::util::FastHashMap<u32, Rc<RefCell<Tree>>>; 12] = std::default::Default::default();
                         for ((i, map), input) in events.iter_mut().enumerate().zip(b.events.iter()) {
                             map.reserve(input.len());
                             for (sub, actions) in input {
@@ -1276,7 +1279,7 @@ impl Game {
             .collect::<Vec<_>>();
 
         // Make event holder lists
-        let mut event_holders: [IndexMap<u32, Rc<RefCell<Vec<i32>>>>; 12] = Default::default();
+        let mut event_holders: [crate::util::FastIndexMap<u32, Rc<RefCell<Vec<i32>>>>; 12] = Default::default();
         Self::fill_event_holders(&mut event_holders, &objects);
 
         // Make list of objects with custom draw events
@@ -1350,7 +1353,13 @@ impl Game {
             auto_draw: true,
             last_instance_id,
             last_tile_id,
-            uninit_fields_are_zero: settings.zero_uninitialized_vars,
+            // GM8 con "Abortar en todos los errores" desactivado (caso de Reloaded) deja seguir al
+            // jugador tras un error; leer una variable sin asignar se trata como 0 (igual que el port
+            // de Android, que así arregló cierres en combates dobles). RLD_STRICT=1 restaura el error.
+            uninit_fields_are_zero: settings.zero_uninitialized_vars
+                || (!settings.always_abort && std::env::var_os("RLD_STRICT").is_none()),
+            errors_continue: !settings.always_abort && std::env::var_os("RLD_STRICT").is_none(),
+            errors_logged: 0,
             uninit_args_are_zero: !settings.error_on_uninitialized_args,
             swap_creation_events: settings.swap_creation_events,
             potential_step_settings: Default::default(),
@@ -1472,7 +1481,7 @@ impl Game {
     }
 
     fn fill_event_holders(
-        event_holders: &mut [IndexMap<u32, Rc<RefCell<Vec<ID>>>>],
+        event_holders: &mut [crate::util::FastIndexMap<u32, Rc<RefCell<Vec<ID>>>>],
         objects: &Vec<Option<Box<Object>>>,
     ) {
         for object in objects.iter().flatten() {
@@ -1678,7 +1687,10 @@ impl Game {
         // Update some stored vars
         let mut room_state = room_state;
         std::mem::swap(&mut self.room, &mut room_state);
-        if self.room.persistent && !self.game_start {
+        if room_state.persistent && !self.game_start {
+            // Tras el swap, room_state es la sala que se abandona: se guarda si ELLA es persistente.
+            // (OpenGMK miraba la nueva; la mochila en combate reiniciaba el combate → XP infinita.
+            // Arreglo encontrado por el port de Android, Klisee/pokemon-reloaded-android a79fc2a)
             self.stored_rooms.push(room_state);
         }
         // clearing input here breaks direct keyboard checks, so just step instead

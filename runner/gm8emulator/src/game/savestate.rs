@@ -32,7 +32,7 @@ pub struct SaveState {
     pub rand: Random,
     pub input: Input,
     pub assets: Assets,
-    pub event_holders: [IndexMap<u32, Rc<RefCell<Vec<ID>>>>; 12],
+    pub event_holders: [crate::util::FastIndexMap<u32, Rc<RefCell<Vec<ID>>>>; 12],
     pub custom_draw_objects: HashSet<ID>,
 
     pub background_colour: Colour,

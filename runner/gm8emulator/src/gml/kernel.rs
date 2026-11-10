@@ -8736,6 +8736,14 @@ impl Game {
                 c.bbox_bottom = bbox.bottom;
             }
         }
+        // Máscara sin ningún píxel activo (sprite de combate casi transparente o máscara de relleno):
+        // en GM8 el sprite sigue chocando por su caja. Sin esto, el ataque Vuelo no "aterriza" sobre
+        // el Pokémon y el combate se queda colgado (lo encontró el port de Android, commit 0434cff).
+        for c in &mut colliders {
+            if !c.data.iter().any(|&px| px) {
+                c.data = vec![true; (c.width * c.height) as usize].into_boxed_slice();
+            }
+        }
         let frames = frames
             .into_iter()
             .map(|i| {
