@@ -34,3 +34,25 @@
 6. **Tiempo de carga**: 25 s es demasiado para cada arranque. Plan: preprocesar el juego en el PC (en `update_port.sh`) a un paquete
    ya descomprimido y con texturas en formato de GPU, y usar los 3 núcleos + overclock a 444 MHz.
 7. **Prueba decisiva pendiente**: velocidad del intérprete GML en la consola (FPS reales por sala).
+
+## Primera ejecución completa en PS Vita (10/11/2026, runner sin gráficos, CPU a 444 MHz)
+5400 fotogramas sin cierres, recorrido: intro → título → selección de personaje → charla → casa → menús.
+
+| Sala | Instancias | FPS de lógica (Vita) | PC (este servidor) |
+|---|---|---|---|
+| Home_2 (casa del protagonista) | 135 | **34-37** (objetivo 30) | ~840 |
+| CharlaRoom (diálogo inicial) | 15 | 4-7 | — |
+| SecretRoom (intro con texto) | 24 | 10-22 | — |
+| PersonajeMenu / OpcionesMenu | 12-13 | 150-155 | — |
+
+Conclusiones:
+- La lógica cabe en tiempo real en el mapa, pero sin margen para el dibujado: hay que optimizar.
+- La Vita es ~23× más lenta que el PC de pruebas en este intérprete.
+- Pausas de ~5 s periódicas en Home_2 y diálogos lentos (CharlaRoom): solo en Vita → perfilando por script.
+- Carga: ~31 s hasta el primer fotograma.
+
+Arreglos que hicieron falta para llegar aquí:
+1. Heap newlib (128 MB por defecto) → configurado.
+2. Memoria de arranque 633 → 171 MB: compilación diferida de scripts, píxeles descartados sin renderizador, liberar el .exe.
+3. Pila: el hilo principal de la Vita (~256 KB) se desbordaba en el intérprete GML → hilo con 16 MB.
+4. VitaShell no instalaba el VPK del runner → instalar con "Install folder".
