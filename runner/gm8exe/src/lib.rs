@@ -19,6 +19,27 @@ macro_rules! log {
 }
 
 pub mod asset;
+
+/// Si es true, los píxeles de sprites y fondos se descartan al leer (se conservan medidas y
+/// máscaras de colisión). Lo usa el runner en PS Vita, donde guardar ~190 MB de RGBA no cabe.
+pub static SKIP_PIXELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lee `len` bytes de píxeles, o los salta si SKIP_PIXELS está activo.
+pub(crate) fn read_pixels(reader: &mut impl std::io::Read, len: usize) -> std::io::Result<Box<[u8]>> {
+    use asset::ReadChunk;
+    if SKIP_PIXELS.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut buf = [0u8; 16 * 1024];
+        let mut left = len;
+        while left > 0 {
+            let n = left.min(buf.len());
+            reader.read_exact(&mut buf[..n])?;
+            left -= n;
+        }
+        Ok(Box::new([]))
+    } else {
+        Ok(reader.read_chunk(len)?.into_boxed_slice())
+    }
+}
 pub mod def;
 pub mod gamedata;
 pub mod reader;

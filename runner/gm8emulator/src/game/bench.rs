@@ -102,7 +102,7 @@ impl Game {
             b.line(&format!("-> entra en sala {} '{}' (fotograma {}, velocidad de sala {})", self.room.id, name, b.frame, self.room.speed));
         }
         let speed = self.room.speed.max(1) as u64;
-        if b.window_frames >= speed {
+        if b.window_frames >= speed || now.duration_since(b.window_start).as_secs() >= 10 {
             let secs = now.duration_since(b.window_start).as_secs_f64();
             let fps = b.window_frames as f64 / secs.max(1e-9);
             let line = format!(
