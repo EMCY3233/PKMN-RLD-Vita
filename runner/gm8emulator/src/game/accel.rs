@@ -59,9 +59,35 @@ pub fn rewrite_script(scripts: &[Option<Box<Script>>], id: usize, src: gml::Stri
                 src
             },
         },
+        b"InstanceInView" if trim(src.as_ref()) == INVIEW_ORIGINAL => {
+            crate::startlog("Acelerador: InstanceInView -> rld_in_view");
+            gml::String::from(INVIEW_FAST.to_vec())
+        },
+        // visible=ex(<id de InstanceInView>,x,y,24): llamada directa a la función nativa
+        b"FlowerVisible" => {
+            let inview = scripts.iter().position(|s| {
+                s.as_ref().is_some_and(|s| s.name.as_ref() == b"InstanceInView" && trim(s.source.as_ref()) == INVIEW_ORIGINAL)
+            });
+            match inview {
+                Some(n) if trim(src.as_ref()) == format!("visible=ex({},x,y,24);", n).as_bytes() => {
+                    crate::startlog("Acelerador: FlowerVisible -> rld_in_view");
+                    gml::String::from(b"visible=rld_in_view(x,y,24);".to_vec())
+                },
+                _ => src,
+            }
+        },
         _ => src,
     }
 }
+
+fn trim(b: &[u8]) -> &[u8] {
+    let s = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
+    let e = b.iter().rposition(|c| !c.is_ascii_whitespace()).map_or(s, |e| e + 1);
+    &b[s..e.max(s)]
+}
+
+const INVIEW_ORIGINAL: &[u8] = b"if(argument0<view_xview[0]-argument2)return false; if(argument0>view_xview[0]+view_wview[0]+argument2)return false; if(argument1<view_yview[0]-argument2)return false; if(argument1>view_yview[0]+view_hview[0]+argument2)return false; return true;";
+const INVIEW_FAST: &[u8] = b"return rld_in_view(argument0,argument1,argument2);";
 
 /// Autocomprobación (RLD_SELFTEST=1): compara rld_text_line con la lectura original
 /// (file_text_readln ×(n-1) + file_text_read_string) en todas las líneas de los textos del juego.
@@ -365,6 +391,75 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
 }
 
 impl crate::game::Game {
+    /// Autocomprobación de rld_in_view (RLD_SELFTEST=1): original GML contra la versión nativa con
+    /// varias vistas y puntos dentro, fuera y justo en el borde (incluidos decimales y cadenas).
+    pub fn accel_selftest_inview(&mut self) {
+        use crate::{
+            game::GetAsset,
+            gml::{Context, Value},
+            instance::Instance,
+        };
+        let (Ok(orig), Ok(fast)) = (self.compiler.compile(INVIEW_ORIGINAL), self.compiler.compile(INVIEW_FAST)) else {
+            crate::startlog("SELFTEST rld_in_view: no compila");
+            return
+        };
+        let had_views = !self.room.views.is_empty();
+        if !had_views {
+            self.room.views.push(crate::game::view::View {
+                visible: false, source_x: 0, source_y: 0, source_w: 0, source_h: 0, port_x: 0, port_y: 0,
+                port_w: 0, port_h: 0, angle: 0.0.into(), follow_target: -1, follow_hborder: 0,
+                follow_vborder: 0, follow_hspeed: 0, follow_vspeed: 0,
+            });
+        }
+        let saved = (self.room.views[0].source_x, self.room.views[0].source_y, self.room.views[0].source_w, self.room.views[0].source_h);
+        let (mut cases, mut bad) = (0u32, 0u32);
+        let pts: [f64; 9] = [-100.0, -24.0, -23.9999999, 0.0, 12.5, 160.0, 343.99999999, 344.0, 1000.0];
+        for view in [(0, 0, 320, 240), (100, 37, 320, 180), (-5, 900, 640, 480)] {
+            self.room.views[0].source_x = view.0;
+            self.room.views[0].source_y = view.1;
+            self.room.views[0].source_w = view.2;
+            self.room.views[0].source_h = view.3;
+            let mut inputs: Vec<[Value; 3]> = Vec::new();
+            for &x in &pts {
+                for &y in &pts {
+                    for m in [0.0, 24.0, 7.5] {
+                        inputs.push([(x + view.0 as f64).into(), (y + view.1 as f64).into(), m.into()]);
+                    }
+                }
+            }
+            inputs.push([Value::Str("a".into()), 0.0.into(), 24.0.into()]);
+            inputs.push([0.0.into(), Value::Str("a".into()), 24.0.into()]);
+            inputs.push([0.0.into(), 0.0.into(), Value::Str("a".into())]);
+            for input in inputs {
+                let mut results = Vec::new();
+                for code in [&orig, &fast] {
+                    let dummy = self
+                        .room
+                        .instance_list
+                        .insert_dummy(Instance::new_dummy(self.assets.objects.get_asset(0).map(|x| x.as_ref())));
+                    let mut ctx = Context::with_single_instance(dummy);
+                    ctx.arguments[..3].clone_from_slice(&input);
+                    ctx.argument_count = 3;
+                    let r = self.execute(code, &mut ctx);
+                    self.room.instance_list.remove_dummy(dummy);
+                    results.push(format!("{:?} {:?}", r.map(|_| ()).map_err(|e| e.to_string()), ctx.return_value));
+                }
+                cases += 1;
+                if results[0] != results[1] {
+                    bad += 1;
+                    if bad <= 3 {
+                        crate::startlog(&format!("SELFTEST rld_in_view {:?} {:?}: {} != {}", view, input, results[0], results[1]));
+                    }
+                }
+            }
+        }
+        (self.room.views[0].source_x, self.room.views[0].source_y, self.room.views[0].source_w, self.room.views[0].source_h) = saved;
+        if !had_views {
+            self.room.views.clear();
+        }
+        crate::startlog(&format!("SELFTEST rld_in_view: {} casos, {} diferencias", cases, bad));
+    }
+
     /// Autocomprobación de las tablas (RLD_SELFTEST=1): ejecuta cada script reescrita en su versión
     /// original y en la acelerada con todas sus claves y con valores ausentes, y compara resultados.
     pub fn accel_selftest_tables(&mut self) {

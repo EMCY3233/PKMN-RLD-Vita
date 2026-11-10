@@ -6063,6 +6063,37 @@ impl Game {
     }
 
     /// rld_lookup(tabla, clave): valor de la entrada (ver game::accel)
+    /// Versión nativa del script InstanceInView del juego (¿está (x,y) dentro de la vista 0 con margen?).
+    /// Lo llaman cada fotograma todas las flores y hierbas (≈1100 veces por fotograma en la Zona Safari).
+    /// Mismas operaciones, en el mismo orden, que el GML original: mismos resultados y mismos errores.
+    pub fn rld_in_view(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let [a0, a1, a2] = match args {
+            [a, b, c, ..] => [a.clone(), b.clone(), c.clone()],
+            _ => return Err(gml::Error::WrongArgumentCount(3, args.len())),
+        };
+        let v = &self.room.views[0];
+        let (xv, yv, wv, hv): (Value, Value, Value, Value) =
+            (v.source_x.into(), v.source_y.into(), v.source_w.into(), v.source_h.into());
+        let f: Value = gml::FALSE.into();
+        // if(argument0<view_xview[0]-argument2)return false;
+        if a0.clone().gml_lt(xv.clone().sub(a2.clone())?)?.is_truthy() {
+            return Ok(f)
+        }
+        // if(argument0>view_xview[0]+view_wview[0]+argument2)return false;
+        if a0.gml_gt(xv.add(wv)?.add(a2.clone())?)?.is_truthy() {
+            return Ok(f)
+        }
+        // if(argument1<view_yview[0]-argument2)return false;
+        if a1.clone().gml_lt(yv.clone().sub(a2.clone())?)?.is_truthy() {
+            return Ok(f)
+        }
+        // if(argument1>view_yview[0]+view_hview[0]+argument2)return false;
+        if a1.gml_gt(yv.add(hv)?.add(a2)?)?.is_truthy() {
+            return Ok(f)
+        }
+        Ok(gml::TRUE.into())
+    }
+
     pub fn rld_lookup(args: &[Value]) -> gml::Result<Value> {
         let (table, key) = expect_args!(args, [int, real])?;
         Ok(match crate::game::accel::lookup(table as usize, key.into()) {
