@@ -72,6 +72,8 @@ jobs:
           RUSTUP_TOOLCHAIN: nightly
           # simd-adler32 (decodificador PNG) usa intrínsecos NEON, aún inestables en ARM de 32 bits
           RUSTFLAGS: "-Zcrate-attr=feature(stdarch_arm_neon_intrinsics)"
+          # strip es incompatible con -Wl,-q (la Vita necesita conservar las relocalizaciones)
+          CARGO_PROFILE_RELEASE_STRIP: "false"
         run: cargo vita build vpk -- --release --no-default-features --features vita
       - uses: actions/upload-artifact@v4
         with:
