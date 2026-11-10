@@ -151,3 +151,7 @@ jobs:
         with:
           name: reloaded-runner-gl-vpk
           path: runner/target/armv7-sony-vita-newlibeabihf/release/*.vpk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-runner-gl-elf
+          path: runner/target/armv7-sony-vita-newlibeabihf/release/gm8emulator.elf
