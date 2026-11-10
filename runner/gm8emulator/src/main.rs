@@ -102,6 +102,12 @@ fn main() {
             EXIT_FAILURE
         });
     startlog(&format!("Fin (código {code})"));
+    // En la Vita, exit() no termina otros hilos (p. ej. la pantalla de arranque de vitaGL): la
+    // aplicación se quedaba abierta con el logo tras un error
+    #[cfg(target_os = "vita")]
+    unsafe {
+        vitasdk_sys::sceKernelExitProcess(code);
+    }
     process::exit(code);
 }
 
@@ -113,7 +119,12 @@ const VITA_DIR: &str = "ux0:data/reloaded";
 #[cfg(target_os = "vita")]
 #[used]
 #[no_mangle]
-pub static _newlib_heap_size_user: u32 = 280 * 1024 * 1024;
+pub static _newlib_heap_size_user: u32 = if cfg!(feature = "vitagl") {
+    // con gráficos, vitaGL necesita su propia memoria fuera del montón (búferes de la GPU, shaders)
+    230 * 1024 * 1024
+} else {
+    280 * 1024 * 1024
+};
 
 /// Relleno opcional al final del segmento de código (RLD_ELF_PAD=1 al compilar).
 /// vita-elf-create necesita ~1,6 KB libres tras el código, y el segmento de datos empieza en el

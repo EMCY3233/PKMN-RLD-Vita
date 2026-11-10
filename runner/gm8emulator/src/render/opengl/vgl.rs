@@ -48,6 +48,16 @@ unsafe fn bgra_to_rgba(format: GLenum, ty: GLenum, w: GLsizei, h: GLsizei, data:
 
 extern "C" {
     fn vglInitExtended(legacy_pool_size: c_int, width: c_int, height: c_int, ram_threshold: c_int, msaa: c_int) -> u8;
+    fn vglInitWithCustomSizes(
+        legacy_pool_size: c_int,
+        width: c_int,
+        height: c_int,
+        ram_pool_size: c_int,
+        cdram_pool_size: c_int,
+        phycont_pool_size: c_int,
+        cdlg_pool_size: c_int,
+        msaa: c_int,
+    ) -> u8;
     fn vglGetProcAddress(name: *const c_char) -> *mut c_void;
     fn vglSwapBuffers(has_commondialog: u8);
     fn vglWaitVblankStart(enable: u8);
@@ -190,6 +200,24 @@ unsafe extern "C" fn shim_get_error() -> GLenum {
     0
 }
 
+/// (RAM de usuario, CDRAM, phycont) libres, en bytes
+fn free_memory() -> (i32, i32, i32) {
+    let mut info = vitasdk_sys::SceKernelFreeMemorySizeInfo {
+        size: std::mem::size_of::<vitasdk_sys::SceKernelFreeMemorySizeInfo>() as i32,
+        size_user: 0,
+        size_cdram: 0,
+        size_phycont: 0,
+    };
+    unsafe {
+        vitasdk_sys::sceKernelGetFreeMemorySize(&mut info);
+    }
+    (info.size_user, info.size_cdram, info.size_phycont)
+}
+
+fn shader_compiler_present() -> bool {
+    std::fs::metadata("ur0:data/libshacccg.suprx").is_ok() || std::fs::metadata("ur0:/data/libshacccg.suprx").is_ok()
+}
+
 pub struct PlatformImpl {
     vsync: std::cell::Cell<u32>,
 }
@@ -197,9 +225,45 @@ pub struct PlatformImpl {
 impl PlatformImpl {
     pub unsafe fn new(_connection: &Connection, _window: &Window) -> Result<Self, String> {
         // Los shaders se compilan en la consola con libshacccg.suprx (ur0:data/libshacccg.suprx)
-        // 960×544 a pantalla completa; el umbral de RAM deja memoria normal para el juego
-        if vglInitExtended(0, 960, 544, 24 * 1024 * 1024, 0) == 0 {
-            return Err("vitaGL no se pudo iniciar".into())
+        let free = free_memory();
+        crate::startlog(&format!(
+            "Memoria libre antes de vitaGL: RAM {} MB, CDRAM {} MB, phycont {} MB",
+            free.0 / 1048576,
+            free.1 / 1048576,
+            free.2 / 1048576
+        ));
+        if !shader_compiler_present() {
+            crate::startlog("AVISO: no existe ur0:data/libshacccg.suprx (vitaGL no podrá compilar shaders)");
+        }
+        // 1º: tamaños explícitos según la memoria libre (deja margen para el sistema)
+        let mb = 1024 * 1024;
+        let ram = (free.0 - 8 * mb).clamp(0, 48 * mb);
+        let cdram = (free.1 - 4 * mb).max(0);
+        let phy = (free.2 - 2 * mb).clamp(0, 16 * mb);
+        let mut ok = false;
+        if ram > 8 * mb && cdram > 16 * mb {
+            ok = vglInitWithCustomSizes(0, 960, 544, ram, cdram, phy, 0, 0) != 0;
+            crate::startlog(&format!(
+                "vglInitWithCustomSizes(ram {} MB, cdram {} MB, phycont {} MB): {}",
+                ram / mb,
+                cdram / mb,
+                phy / mb,
+                if ok { "OK" } else { "falló" }
+            ));
+        }
+        // 2º: inicio estándar dejando 8 MB de RAM libres
+        if !ok {
+            ok = vglInitExtended(0, 960, 544, 8 * mb, 0) != 0;
+            crate::startlog(&format!("vglInitExtended: {}", if ok { "OK" } else { "falló" }));
+        }
+        if !ok {
+            let f = free_memory();
+            return Err(format!(
+                "vitaGL no se pudo iniciar (libre: RAM {} MB, CDRAM {} MB, phycont {} MB)",
+                f.0 / mb,
+                f.1 / mb,
+                f.2 / mb
+            ))
         }
         let load = |n: &str| {
             let c = CString::new(n).unwrap();
