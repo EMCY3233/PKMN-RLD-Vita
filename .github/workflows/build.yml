@@ -36,7 +36,12 @@ jobs:
       - name: Herramientas base
         run: apk add --no-cache git curl bash build-base || (apt-get update && apt-get install -y git curl build-essential)
       - uses: actions/checkout@v4
-      - name: Rust nightly + cargo-vita
+      - name: Inventario de librerías gráficas de VitaSDK (vitaGL)
+        continue-on-error: true
+        run: |
+          ls $VITASDK/arm-vita-eabi/lib | grep -iE "gl|shark|mathneon|taihen|kubridge|sdl|gxm" || true
+          ls $VITASDK/arm-vita-eabi/include | grep -iE "gl|shark|sdl" || true
+          ls $VITASDK/arm-vita-eabi/lib/libSceShaccCg* $VITASDK/arm-vita-eabi/lib/libSceShaccCgExt* 2>&1 || true
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
