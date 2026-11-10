@@ -79,3 +79,8 @@ jobs:
         with:
           name: reloaded-runner-bench-vpk
           path: runner/target/armv7-sony-vita-newlibeabihf/release/*.vpk
+      - name: Guardar ELF con símbolos (para analizar volcados .psp2dmp)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-runner-bench-elf
+          path: runner/target/armv7-sony-vita-newlibeabihf/release/gm8emulator.elf
