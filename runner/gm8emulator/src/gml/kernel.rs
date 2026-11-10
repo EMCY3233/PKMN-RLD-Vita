@@ -6047,6 +6047,31 @@ impl Game {
         Ok(gml::String::from(line).into())
     }
 
+    /// rld_lookup_has(tabla, clave): ¿coincide la clave con alguna entrada? (solo claves reales;
+    /// en GM8 comparar una cadena con un número es falso)
+    pub fn rld_lookup_has(args: &[Value]) -> gml::Result<Value> {
+        let (table, key) = expect_args!(args, [int, any])?;
+        match key {
+            Value::Real(k) => Ok(crate::game::accel::lookup(table as usize, k.into()).is_some().into()),
+            // igual que el original: su primera comparación (texto == número) es un error de GM8
+            s @ Value::Str(_) => Err(gml::Error::InvalidOperandsBinary(
+                gml_parser::token::Operator::Equal,
+                s,
+                crate::game::accel::first_key(table as usize).unwrap_or(0.0).into(),
+            )),
+        }
+    }
+
+    /// rld_lookup(tabla, clave): valor de la entrada (ver game::accel)
+    pub fn rld_lookup(args: &[Value]) -> gml::Result<Value> {
+        let (table, key) = expect_args!(args, [int, real])?;
+        Ok(match crate::game::accel::lookup(table as usize, key.into()) {
+            Some(crate::game::accel::Lit::Real(r)) => r.into(),
+            Some(crate::game::accel::Lit::Str(s)) => gml::String::from(s).into(),
+            None => Default::default(),
+        })
+    }
+
     pub fn file_text_readln(&mut self, args: &[Value]) -> gml::Result<Value> {
         let handle = expect_args!(args, [int])?;
         match self.text_files.get_mut(handle - 1).map_or(Err(file::Error::InvalidFile(handle)), |f| f.skip_line()) {
@@ -8628,9 +8653,106 @@ impl Game {
         }
     }
 
+    /// sprite_add_sprite(archivo.gmspr): sprite exportado por el IDE de GM8 (lo usa Pokémon Reloaded
+    /// para los ~26.000 sprites de data/pkmnbattle). Formato:
+    ///   u32 1234321, u32 longitud, zlib{ u32 800, u32 origen_x, u32 origen_y, u32 nº fotogramas,
+    ///   por fotograma: u32 800, u32 ancho, u32 alto, u32 longitud, píxeles BGRA,
+    ///   u32 forma, u32 tolerancia, u32 máscaras separadas, u32 tipo de caja, u32 izq, der, abajo, arriba }
     pub fn sprite_add_sprite(&mut self, args: &[Value]) -> gml::Result<Value> {
-        let _ = args;
-        Ok((-1).into())
+        let fname = expect_args!(args, [string])?;
+        let path = file::to_path(&fname).into_owned();
+        let parsed = (|| -> Option<_> {
+            use std::io::Read as _;
+            let raw = file::read_any(&path).ok()?;
+            let u32_at = |d: &[u8], o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+            if u32_at(&raw, 0)? != 1234321 {
+                return None
+            }
+            let clen = u32_at(&raw, 4)? as usize;
+            let mut z = Vec::new();
+            flate2::read::ZlibDecoder::new(raw.get(8..8 + clen)?).read_to_end(&mut z).ok()?;
+            let (ox, oy, n) = (u32_at(&z, 4)? as i32, u32_at(&z, 8)? as i32, u32_at(&z, 12)? as usize);
+            let mut p = 16;
+            let mut frames = Vec::with_capacity(n);
+            for _ in 0..n {
+                let (w, h, len) = (u32_at(&z, p + 4)?, u32_at(&z, p + 8)?, u32_at(&z, p + 12)? as usize);
+                let data = z.get(p + 16..p + 16 + len)?.to_vec();
+                if len != (w * h * 4) as usize {
+                    return None
+                }
+                frames.push(RgbaImage::from_vec(w, h, data)?);
+                p += 16 + len;
+            }
+            let mut tail = [0u32; 8];
+            for (k, t) in tail.iter_mut().enumerate() {
+                *t = u32_at(&z, p + k * 4).unwrap_or(0);
+            }
+            Some((ox, oy, frames, tail))
+        })();
+        let Some((origin_x, origin_y, frames, [shape, tolerance, sepmasks, bbox_type, left, right, bottom, top])) = parsed
+        else {
+            eprintln!("Warning: sprite_add_sprite on {} failed", fname);
+            return Ok((-1).into())
+        };
+        if frames.is_empty() {
+            return Ok((-1).into())
+        }
+        let (width, height) = frames[0].dimensions();
+        let bbox = match bbox_type {
+            0 => None,
+            1 => Some(asset::sprite::BoundingBox { left: 0, right: width - 1, top: 0, bottom: height - 1 }),
+            _ => Some(asset::sprite::BoundingBox { left, right: right.min(width), top, bottom: bottom.min(height) }),
+        };
+        let tolerance = tolerance.min(255) as u8;
+        let sepmasks = sepmasks != 0;
+        // el canal alfa está en la misma posición en BGRA y RGBA, así que las máscaras salen igual
+        let mut colliders = match shape {
+            0 if bbox.is_none() => asset::sprite::make_colliders_precise(&frames, tolerance, sepmasks),
+            _ => asset::sprite::make_colliders_shaped(&frames, tolerance, sepmasks, bbox, match shape {
+                1 => Some(asset::sprite::ColliderShape::Rectangle),
+                2 => Some(asset::sprite::ColliderShape::Ellipse),
+                3 => Some(asset::sprite::ColliderShape::Diamond),
+                _ => None,
+            }),
+        };
+        // como sprite_collision_mask: una caja manual o completa se impone a la calculada
+        if let Some(bbox) = bbox {
+            for c in &mut colliders {
+                c.bbox_left = bbox.left;
+                c.bbox_top = bbox.top;
+                c.bbox_right = bbox.right;
+                c.bbox_bottom = bbox.bottom;
+            }
+        }
+        let frames = frames
+            .into_iter()
+            .map(|i| {
+                Ok(asset::sprite::Frame {
+                    width,
+                    height,
+                    atlas_ref: self
+                        .renderer
+                        .upload_sprite(i.into_raw().into_boxed_slice(), width as _, height as _, origin_x, origin_y)
+                        .map_err(|e| gml::Error::FunctionError("sprite_add_sprite".into(), e.into()))?,
+                })
+            })
+            .collect::<gml::Result<_>>()?;
+        let sprite_id = self.assets.sprites.len();
+        self.assets.sprites.push(Some(Box::new(asset::Sprite {
+            name: format!("__newsprite{}", sprite_id).into(),
+            frames,
+            bbox_left: colliders.iter().map(|c| c.bbox_left).min().unwrap_or(0),
+            bbox_right: colliders.iter().map(|c| c.bbox_right).max().unwrap_or(0),
+            bbox_top: colliders.iter().map(|c| c.bbox_top).min().unwrap_or(0),
+            bbox_bottom: colliders.iter().map(|c| c.bbox_bottom).max().unwrap_or(0),
+            per_frame_colliders: colliders.len() > 1,
+            colliders,
+            width,
+            height,
+            origin_x,
+            origin_y,
+        })));
+        Ok(sprite_id.into())
     }
 
     pub fn sprite_replace_sprite(&mut self, _args: &[Value]) -> gml::Result<Value> {
@@ -9980,8 +10102,10 @@ impl Game {
     pub fn object_event_clear(&mut self, args: &[Value]) -> gml::Result<Value> {
         let (object_index, ev_type, ev_number) = expect_args!(args, [int, int, int])?;
         if let Some(object) = self.assets.objects.get_asset_mut(object_index) {
-            object.events[ev_type as usize].remove(&(ev_number as u32));
-            self.refresh_event_holders();
+            // solo hace falta recalcular si de verdad existía ese evento
+            if object.events[ev_type as usize].remove(&(ev_number as u32)).is_some() {
+                self.refresh_event_holders();
+            }
         }
         Ok(Default::default())
     }

@@ -557,6 +557,9 @@ impl Game {
             .filter_map(|(i, x)| x.as_ref().map(|x| (i, x)))
             .for_each(|(i, x)| compiler.register_script(x.name.0.clone(), i));
 
+        // Acelerador: despachador `ex` (ver Compiler::inline_ex y game/accel.rs)
+        compiler.inline_ex = crate::game::accel::detect_ex_dispatcher(&scripts);
+
         // Register extension function names and constants
         compiler.reserve_extension_functions(
             extensions.iter().map(|x| x.files.iter().map(|x| x.functions.len()).sum::<usize>()).sum::<usize>(),
@@ -1476,17 +1479,28 @@ impl Game {
             for (holder_list, object_events) in event_holders.iter_mut().zip(object.events.iter()) {
                 for (sub, _) in object_events.iter() {
                     let mut sub_list = holder_list.entry(*sub).or_insert(Default::default()).borrow_mut();
-                    for object_id in object.children.borrow().iter() {
-                        if !sub_list.contains(object_id) {
-                            sub_list.push(*object_id);
-                        }
-                    }
+                    // sin comprobar duplicados aquí (era cuadrático con ~2000 objetos: ~40 ms por
+                    // object_event_add/clear); se ordena y deduplica justo después
+                    sub_list.extend(object.children.borrow().iter().copied());
                 }
+            }
+        }
+        for map in event_holders.iter_mut() {
+            for list in map.values_mut() {
+                let mut l = list.borrow_mut();
+                l.sort_unstable();
+                l.dedup();
             }
         }
 
         // Swap collision events over to targets and their children etc...
         let collision_holders = &mut event_holders[ev::COLLISION];
+        // Conjuntos paralelos a cada lista para comprobar pertenencia sin recorrerla
+        // (antes `contains` lineal: ~20 ms por object_event_add en este juego)
+        let mut members: std::collections::HashMap<u32, std::collections::HashSet<ID>> = collision_holders
+            .iter()
+            .map(|(k, l)| (*k, l.borrow().iter().copied().collect()))
+            .collect();
         let mut i = 0;
         while let Some(key) = collision_holders.get_index(i).map(|(x, _)| *x) {
             if let Some(Some(object)) = objects.get(key as usize) {
@@ -1499,8 +1513,9 @@ impl Game {
                     {
                         let mut sub_list =
                             collision_holders.entry(collider as _).or_insert(Default::default()).borrow_mut();
+                        let set = members.entry(collider as _).or_default();
                         for child in object.children.borrow().iter() {
-                            if !sub_list.contains(child) {
+                            if set.insert(*child) {
                                 sub_list.push(*child);
                             }
                         }
@@ -1508,7 +1523,7 @@ impl Game {
                     for child in object.children.borrow().iter().copied() {
                         let mut sub_list =
                             collision_holders.entry(child as _).or_insert(Default::default()).borrow_mut();
-                        if !sub_list.contains(&collider) {
+                        if members.entry(child as _).or_default().insert(collider) {
                             sub_list.push(collider);
                         }
                     }

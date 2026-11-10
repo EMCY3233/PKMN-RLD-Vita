@@ -27,6 +27,11 @@ pub struct Compiler {
 
     /// Lookup table of unique field names
     fields: Vec<Box<[u8]>>,
+
+    /// Acelerador del port: id de la script despachadora `ex` de Pokémon Reloaded, si es exactamente
+    /// `return script_execute(argument0,...,argument15);`. Entonces `ex(N, ...)` con N constante se
+    /// compila como llamada directa a la script N (evita una llamada a script + script_execute).
+    pub inline_ex: Option<usize>,
 }
 
 impl Compiler {
@@ -38,6 +43,7 @@ impl Compiler {
             script_names: HashMap::new(),
             extension_fn_names: HashMap::new(),
             fields: Vec::new(),
+            inline_ex: None,
         }
     }
 
@@ -380,7 +386,26 @@ impl Compiler {
                     .collect::<Vec<_>>()
                     .into_boxed_slice();
 
-                if let Some(script_id) = self.get_script_id(function.name) {
+                let inline_target = match (self.inline_ex, self.get_script_id(function.name)) {
+                    (Some(ex), Some(id)) if ex == id => match args.first() {
+                        Some(Node::Literal { value: Value::Real(r) }) => {
+                            let n = r.into_inner();
+                            if n >= 0.0 && n.fract() == 0.0 && n < 1e9 { Some(n as usize) } else { None }
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(target) = inline_target {
+                    // ex(N, a, b, ...) -> N(a, b, ..., 0, 0, ...): ex reenvía siempre 15 argumentos, así
+                    // que se rellenan con 0 para que la script destino reciba exactamente lo mismo
+                    let mut v = args.into_vec();
+                    v.remove(0);
+                    while v.len() < 15 {
+                        v.push(Node::Literal { value: Value::Real(Real::from(0.0)) });
+                    }
+                    Node::Script { args: v.into_boxed_slice(), script_id: target }
+                } else if let Some(script_id) = self.get_script_id(function.name) {
                     Node::Script { args, script_id }
                 } else if let Some(id) = self.extension_fn_names.get(function.name).copied() {
                     Node::ExtensionFunction { args, id }

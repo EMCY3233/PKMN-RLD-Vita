@@ -378,6 +378,7 @@ dependencies = [
  "clipboard",
  "crc32fast",
  "encoding_rs",
+ "flate2",
  "getopts",
  "getrandom",
  "gl_generator",

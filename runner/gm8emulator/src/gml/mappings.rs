@@ -1380,6 +1380,8 @@ pub const FUNCTIONS: phf::OrderedMap<&'static str, Function> = phf_ordered_map! 
     "file_text_readln" => Function::Engine(Game::file_text_readln),
     // Acelerador del port (no existe en GM8): ver Game::script_code / TextReader
     "rld_text_line" => Function::Engine(Game::rld_text_line),
+    "rld_lookup_has" => Function::Pure(Game::rld_lookup_has),
+    "rld_lookup" => Function::Pure(Game::rld_lookup),
     "file_text_eof" => Function::Engine(Game::file_text_eof),
     "file_text_eoln" => Function::Engine(Game::file_text_eoln),
     "file_text_write_string" => Function::Engine(Game::file_text_write_string),

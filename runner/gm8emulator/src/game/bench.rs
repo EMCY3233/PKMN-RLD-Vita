@@ -25,8 +25,18 @@ pub struct Bench {
     rooms_seen: Vec<i32>,
     polls: u64,
     /// Perfilado por script: pila de (script, inicio, tiempo en hijas) y tiempo propio acumulado
-    prof_stack: Vec<(usize, Instant, f64)>,
-    prof_self: std::collections::HashMap<usize, (u32, f64)>,
+    prof_stack: Vec<(ProfKey, Instant, f64)>,
+    prof_self: std::collections::HashMap<ProfKey, (u32, f64)>,
+    /// Acumulado de todo el recorrido (RLD_PROFILE=1)
+    prof_total: std::collections::HashMap<ProfKey, (u64, f64)>,
+    pub prof_all: bool,
+}
+
+/// Qué se está midiendo: una script (por id) o una función interna del motor (por dirección)
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProfKey {
+    Script(usize),
+    Func(usize),
 }
 
 impl Bench {
@@ -46,6 +56,8 @@ impl Bench {
             polls: 0,
             prof_stack: Vec::new(),
             prof_self: Default::default(),
+            prof_total: Default::default(),
+            prof_all: std::env::var_os("RLD_PROFILE").is_some(),
         };
         b.line(&format!("Benchmark del runner - plataforma: {} - {} fotogramas", std::env::consts::OS, max_frames));
         b.line("seg_real | fotogramas | FPS | peor_fotograma_ms | sala | instancias");
@@ -62,10 +74,33 @@ impl Bench {
 }
 
 impl Game {
+    fn prof_name(&self, k: ProfKey) -> String {
+        match k {
+            ProfKey::Script(id) => self.assets.scripts.get(id).and_then(|s| s.as_ref()).map(|s| String::from_utf8_lossy(s.name.as_ref()).into_owned()).unwrap_or_default(),
+            ProfKey::Func(addr) => crate::gml::mappings::FUNCTIONS
+                .entries()
+                .find(|(_, f)| f.addr() as usize == addr)
+                .map(|(n, _)| format!("{}()", n))
+                .unwrap_or_else(|| format!("fn@{:x}", addr)),
+        }
+    }
+
     /// Entrada en una script (solo cuenta en modo benchmark)
     pub fn bench_enter(&mut self, id: usize) {
         if let Some(b) = self.bench.as_mut() {
-            b.prof_stack.push((id, Instant::now(), 0.0));
+            b.prof_stack.push((ProfKey::Script(id), Instant::now(), 0.0));
+        }
+    }
+
+    /// Entrada en una función interna (solo con RLD_PROFILE=1, porque medir cada llamada cuesta)
+    #[inline]
+    pub fn bench_enter_fn(&mut self, addr: usize) -> bool {
+        match self.bench.as_mut() {
+            Some(b) if b.prof_all => {
+                b.prof_stack.push((ProfKey::Func(addr), Instant::now(), 0.0));
+                true
+            },
+            _ => false,
         }
     }
 
@@ -74,9 +109,15 @@ impl Game {
         if let Some(b) = self.bench.as_mut() {
             if let Some((id, start, child)) = b.prof_stack.pop() {
                 let total = start.elapsed().as_secs_f64();
+                let selft = (total - child).max(0.0);
                 let e = b.prof_self.entry(id).or_insert((0, 0.0));
                 e.0 += 1;
-                e.1 += (total - child).max(0.0);
+                e.1 += selft;
+                if b.prof_all {
+                    let t = b.prof_total.entry(id).or_insert((0, 0.0));
+                    t.0 += 1;
+                    t.1 += selft;
+                }
                 if let Some(parent) = b.prof_stack.last_mut() {
                     parent.2 += total;
                 }
@@ -130,8 +171,7 @@ impl Game {
             let total: f64 = v.iter().map(|x| x.1 .1).sum();
             let mut line = format!("   lento: fotograma {} de {:.0} ms (scripts {:.0} ms) ->", b.frame + 1, ms, total * 1000.0);
             for (id, (calls, secs)) in v.iter().take(5) {
-                let name = self.assets.scripts.get(*id).and_then(|s| s.as_ref()).map(|s| String::from_utf8_lossy(s.name.as_ref()).into_owned()).unwrap_or_default();
-                line.push_str(&format!(" {}({}x) {:.0}ms;", name, calls, secs * 1000.0));
+                line.push_str(&format!(" {}({}x) {:.0}ms;", self.prof_name(*id), calls, secs * 1000.0));
             }
             b.line(&line);
         }
@@ -167,6 +207,19 @@ impl Game {
             let total = now.duration_since(b.start).as_secs_f64();
             let line = format!("FIN: {} fotogramas en {:.1} s = {:.1} FPS de media", frame, total, frame as f64 / total.max(1e-9));
             b.line(&line);
+            if b.prof_all {
+                let mut v: Vec<_> = b.prof_total.iter().map(|(k, v)| (*k, *v)).collect();
+                v.sort_by(|a, b| b.1 .1.partial_cmp(&a.1 .1).unwrap_or(std::cmp::Ordering::Equal));
+                let measured: f64 = v.iter().map(|x| x.1 .1).sum();
+                b.line(&format!("PERFIL (tiempo propio, todo el recorrido): medido {:.1} s de {:.1} s; resto = motor (eventos, colisiones automáticas, dibujado)", measured, total));
+                for kind in ["script", "función"] {
+                    b.line(&format!("  -- top {}s --", kind));
+                    for (k, (calls, secs)) in v.iter().filter(|(k, _)| matches!((k, kind), (ProfKey::Script(_), "script") | (ProfKey::Func(_), "función"))).take(30) {
+                        let l = format!("  {:6.2} s {:5.1}% {:>10} llamadas  {:8.2} µs/llamada  {}", secs, secs / total * 100.0, calls, secs / *calls as f64 * 1e6, self.prof_name(*k));
+                        b.line(&l);
+                    }
+                }
+            }
         }
         self.bench = Some(b);
         done

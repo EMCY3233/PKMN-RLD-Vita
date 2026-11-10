@@ -353,6 +353,10 @@ fn xmain() -> i32 {
         },
     };
 
+    if env::var_os("RLD_SELFTEST").is_some() {
+        components.accel_selftest_tables();
+    }
+
     if let Some(n) = bench_frames {
         components.bench = Some(game::bench::Bench::new(n, &bench_log));
     }
