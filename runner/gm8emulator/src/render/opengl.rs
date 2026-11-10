@@ -24,10 +24,14 @@ mod wgl;
 mod wgl_ffi;
 #[cfg(target_os = "windows")]
 use wgl as native_gl;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "vita")))]
 pub mod glx;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "vita")))]
 use glx as native_gl;
+#[cfg(target_os = "vita")]
+pub mod vgl;
+#[cfg(target_os = "vita")]
+use vgl as native_gl;
 
 macro_rules! shader_file {
     ($path: expr) => {
@@ -198,6 +202,7 @@ pub struct RendererImpl {
     primitive_2d: PrimitiveBuilder,
     primitive_3d: PrimitiveBuilder,
 
+    simple: Option<SimpleUniforms>,
     loc_gm81_normalize: GLint, // uniform bool gm81_normalize
     loc_tex: GLint,            // uniform sampler2D tex
     buf_state: GLuint,         // uniform RenderState state
@@ -212,6 +217,43 @@ struct Framebuffer {
 
 static VERTEX_SHADER_SOURCE: &[u8] = shader_file!("glsl/vertex.glsl");
 static FRAGMENT_SHADER_SOURCE: &[u8] = shader_file!("glsl/fragment.glsl");
+// Shaders simplificados (2D, sin UBO ni iluminación) para vitaGL; en PC con RLD_SIMPLE_GL=1
+static SIMPLE_VERTEX_SOURCE: &str = include_str!("glsl/simple_vertex.glsl");
+static SIMPLE_FRAGMENT_SOURCE: &str = include_str!("glsl/simple_fragment.glsl");
+
+/// ¿Usar el camino simplificado? Siempre en Vita; en PC solo para probarlo.
+fn use_simple_gl() -> bool {
+    cfg!(target_os = "vita") || std::env::var_os("RLD_SIMPLE_GL").is_some()
+}
+
+/// Texto final de un shader simplificado: en Vita tal cual (GLSL 1.00 → traductor de vitaGL);
+/// en PC se adapta a GLSL 3.30 core.
+fn simple_shader_source(src: &str, fragment: bool) -> std::ffi::CString {
+    let prelude = if cfg!(target_os = "vita") {
+        ""
+    } else if fragment {
+        "#version 330 core\n#define varying in\n#define texture2D texture\n#define gl_FragColor out_colour\nout vec4 out_colour;\n"
+    } else {
+        "#version 330 core\n#define attribute in\n#define varying out\n"
+    };
+    std::ffi::CString::new(format!("{}{}", prelude, src)).unwrap()
+}
+
+/// Ubicaciones de los uniforms del shader simplificado
+#[derive(Clone, Copy, Default)]
+struct SimpleUniforms {
+    model: GLint,
+    viewproj: GLint,
+    colour_blending: GLint,
+    tex_size: GLint,
+    repeat: GLint,
+    lerp: GLint,
+    alpha_test: GLint,
+    fog_enabled: GLint,
+    fog_begin: GLint,
+    fog_end: GLint,
+    fog_colour: GLint,
+}
 
 unsafe fn shader_info_log(gl: &gl::Gl, name: &str, id: GLuint) -> String {
     let mut info_len: GLint = 0;
@@ -378,6 +420,8 @@ impl RendererImpl {
             let vendor_str = CStr::from_ptr(gl.GetString(gl::VENDOR).cast()).to_str().unwrap();
             eprintln!("creating graphics context\n  > GL_VERSION: \"{}\"\n  > GL_VENDOR: \"{}\"", ver_str, vendor_str);
 
+            #[cfg(not(target_os = "vita"))]
+            {
             let mut v_maj: GLint = 0;
             let mut v_min: GLint = 0;
             gl.GetIntegerv(gl::MAJOR_VERSION, &mut v_maj);
@@ -390,13 +434,18 @@ impl RendererImpl {
                 v_maj,
                 v_min
             );
+            }
 
             imp.set_swap_interval(if options.vsync { 1 } else { 0 });
             let zbuf_format = if options.zbuf_24 { gl::DEPTH_COMPONENT24 } else { gl::DEPTH_COMPONENT16 } as GLint;
 
             // Compile vertex shader
+            let simple = use_simple_gl();
+            let simple_vs = simple_shader_source(SIMPLE_VERTEX_SOURCE, false);
+            let simple_fs = simple_shader_source(SIMPLE_FRAGMENT_SOURCE, true);
             let vertex_shader = gl.CreateShader(gl::VERTEX_SHADER);
-            gl.ShaderSource(vertex_shader, 1, &(VERTEX_SHADER_SOURCE.as_ptr().cast()), ptr::null());
+            let vs_ptr: *const GLchar = if simple { simple_vs.as_ptr() } else { VERTEX_SHADER_SOURCE.as_ptr().cast() };
+            gl.ShaderSource(vertex_shader, 1, &vs_ptr, ptr::null());
             gl.CompileShader(vertex_shader);
 
             // Check for vertex shader compile errors
@@ -408,7 +457,8 @@ impl RendererImpl {
 
             // Compile fragment shader
             let fragment_shader = gl.CreateShader(gl::FRAGMENT_SHADER);
-            gl.ShaderSource(fragment_shader, 1, &(FRAGMENT_SHADER_SOURCE.as_ptr().cast()), ptr::null());
+            let fs_ptr: *const GLchar = if simple { simple_fs.as_ptr() } else { FRAGMENT_SHADER_SOURCE.as_ptr().cast() };
+            gl.ShaderSource(fragment_shader, 1, &fs_ptr, ptr::null());
             gl.CompileShader(fragment_shader);
 
             // Check for fragment shader compile errors
@@ -421,6 +471,12 @@ impl RendererImpl {
             let program = gl.CreateProgram();
             gl.AttachShader(program, vertex_shader);
             gl.AttachShader(program, fragment_shader);
+            if simple {
+                // mismas posiciones que layout(location = N) en los shaders originales
+                for (i, n) in [(0, "pos\0"), (1, "blend\0"), (2, "tex_coord\0"), (4, "atlas_xywh\0")] {
+                    gl.BindAttribLocation(program, i, n.as_ptr().cast());
+                }
+            }
             gl.LinkProgram(program);
 
             // Check for linking errors
@@ -496,7 +552,7 @@ impl RendererImpl {
                 size_of::<Vertex>() as i32,
                 offset_of!(Vertex, tex_coord) as *const _,
             );
-            gl.EnableVertexAttribArray(3);
+            if !simple { gl.EnableVertexAttribArray(3); }
             gl.VertexAttribPointer(
                 3,
                 3,
@@ -565,13 +621,34 @@ impl RendererImpl {
             gl.FramebufferTexture2D(gl::READ_FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::TEXTURE_2D, framebuffer_zbuf, 0);
 
             // setup uniform buffer for render state
-            let loc_state = 1;
-            let ind = gl.GetUniformBlockIndex(program, b"RenderState\0".as_ptr().cast());
-            assert_ne!(ind, gl::INVALID_INDEX);
-            gl.UniformBlockBinding(program, ind, loc_state);
             let mut buf_state: GLuint = 0;
-            gl.GenBuffers(1, &mut buf_state);
-            gl.BindBufferBase(gl::UNIFORM_BUFFER, loc_state, buf_state);
+            let simple_uniforms = if simple {
+                let u = |n: &str| {
+                    let c = std::ffi::CString::new(n).unwrap();
+                    gl.GetUniformLocation(program, c.as_ptr())
+                };
+                Some(SimpleUniforms {
+                    model: u("model"),
+                    viewproj: u("viewproj"),
+                    colour_blending: u("colour_blending"),
+                    tex_size: u("tex_size"),
+                    repeat: u("repeat"),
+                    lerp: u("lerp"),
+                    alpha_test: u("alpha_test"),
+                    fog_enabled: u("fog_enabled"),
+                    fog_begin: u("fog_begin"),
+                    fog_end: u("fog_end"),
+                    fog_colour: u("fog_colour"),
+                })
+            } else {
+                let loc_state = 1;
+                let ind = gl.GetUniformBlockIndex(program, b"RenderState\0".as_ptr().cast());
+                assert_ne!(ind, gl::INVALID_INDEX);
+                gl.UniformBlockBinding(program, ind, loc_state);
+                gl.GenBuffers(1, &mut buf_state);
+                gl.BindBufferBase(gl::UNIFORM_BUFFER, loc_state, buf_state);
+                None
+            };
             assert_eq!(gl.GetError(), 0);
 
             // Create Renderer
@@ -611,6 +688,7 @@ impl RendererImpl {
                 primitive_2d: PrimitiveBuilder::new(Default::default(), PrimitiveType::PointList, false),
                 primitive_3d: PrimitiveBuilder::new(Default::default(), PrimitiveType::PointList, false),
 
+                simple: simple_uniforms,
                 loc_gm81_normalize: gl.GetUniformLocation(program, b"gm81_normalize\0".as_ptr().cast()),
                 loc_tex: gl.GetUniformLocation(program, b"tex\0".as_ptr().cast()),
                 buf_state,
@@ -622,13 +700,7 @@ impl RendererImpl {
             // default uniform values
             renderer.gl.Uniform1i(renderer.loc_gm81_normalize, options.normalize_normals as _);
             renderer.gl.Uniform1i(renderer.loc_tex, 0 as _);
-            renderer.gl.BindBuffer(gl::UNIFORM_BUFFER, renderer.buf_state);
-            renderer.gl.BufferData(
-                gl::UNIFORM_BUFFER,
-                offset_of!(RenderState, end_of_uniform) as _,
-                (&renderer.queue_render_state as *const RenderState).cast(),
-                gl::STATIC_DRAW,
-            );
+            renderer.upload_state();
             assert_eq!(renderer.gl.GetError(), 0);
 
             // Start first frame
@@ -638,6 +710,37 @@ impl RendererImpl {
             match renderer.gl.GetError() {
                 0 => Ok(renderer),
                 err => Err(format!("Failed to fully initialize OpenGL! (OpenGL code {})", err)),
+            }
+        }
+    }
+
+    /// Sube el estado de dibujo al shader: bloque uniforme (original) o uniforms sueltos (simplificado)
+    fn upload_state(&mut self) {
+        let st = &self.queue_render_state;
+        unsafe {
+            match self.simple {
+                None => {
+                    self.gl.BindBuffer(gl::UNIFORM_BUFFER, self.buf_state);
+                    self.gl.BufferData(
+                        gl::UNIFORM_BUFFER,
+                        offset_of!(RenderState, end_of_uniform) as _,
+                        (st as *const RenderState).cast(),
+                        gl::STATIC_DRAW,
+                    );
+                },
+                Some(u) => {
+                    let b = |v: GLBool| if bool::from(v) { 1.0f32 } else { 0.0 };
+                    self.gl.UniformMatrix4fv(u.model, 1, gl::FALSE, st.model_matrix.as_ptr());
+                    self.gl.UniformMatrix4fv(u.viewproj, 1, gl::FALSE, st.viewproj_matrix.as_ptr());
+                    self.gl.Uniform1f(u.colour_blending, b(st.texture_blend));
+                    self.gl.Uniform1f(u.repeat, b(st.texture_repeat));
+                    self.gl.Uniform1f(u.lerp, b(st.interpolate_pixels));
+                    self.gl.Uniform1f(u.alpha_test, b(st.depth_test));
+                    self.gl.Uniform1f(u.fog_enabled, b(st.fog_enabled));
+                    self.gl.Uniform1f(u.fog_begin, st.fog_begin);
+                    self.gl.Uniform1f(u.fog_end, st.fog_end);
+                    self.gl.Uniform4fv(u.fog_colour, 1, st.fog_colour.as_ptr());
+                },
             }
         }
     }
@@ -713,13 +816,7 @@ impl RendererImpl {
                     self.gl.DepthMask(write_depth as _);
                 }
 
-                self.gl.BindBuffer(gl::UNIFORM_BUFFER, self.buf_state);
-                self.gl.BufferData(
-                    gl::UNIFORM_BUFFER,
-                    offset_of!(RenderState, end_of_uniform) as _,
-                    (&self.queue_render_state as *const RenderState).cast(),
-                    gl::STATIC_DRAW,
-                );
+                self.upload_state();
                 assert_eq!(self.gl.GetError(), 0);
             }
         }
@@ -752,6 +849,12 @@ impl RendererImpl {
             }
 
             self.gl.BindTexture(gl::TEXTURE_2D, self.texture_ids[atlas_id as usize].unwrap());
+            if let Some(u) = self.simple {
+                let (mut w, mut h) = (0, 0);
+                self.gl.GetTexLevelParameteriv(gl::TEXTURE_2D, 0, gl::TEXTURE_WIDTH, &mut w);
+                self.gl.GetTexLevelParameteriv(gl::TEXTURE_2D, 0, gl::TEXTURE_HEIGHT, &mut h);
+                self.gl.Uniform2f(u.tex_size, w as f32, h as f32);
+            }
             let filter_mode = if self.queue_render_state.interpolate_pixels.into() { gl::LINEAR } else { gl::NEAREST };
             self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, filter_mode as _);
             self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, filter_mode as _);
@@ -1863,7 +1966,7 @@ impl RendererTrait for RendererImpl {
         self.setup_queue(self.white_pixel.atlas_id, PrimitiveShape::Point);
         self.vertex_queue.push(Vertex {
             pos: [x as f32, y as f32, self.depth],
-            tex_coord: [f32::NAN; 2],
+            tex_coord: [crate::render::UNTEXTURED; 2],
             blend: split_colour(colour, alpha),
             atlas_xywh: self.white_pixel.into(),
             normal: [0.0, 0.0, 0.0],

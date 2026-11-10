@@ -6,3 +6,4 @@ target/
 *.zip
 /data/
 *.gmk
+runner/target-*/

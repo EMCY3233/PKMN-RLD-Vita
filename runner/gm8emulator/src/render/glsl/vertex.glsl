@@ -46,7 +46,7 @@ void main() {
     frag_atlas_xywh = atlas_xywh;
     frag_blend_flat = vec4(1.0);
 
-    if (any(isnan(tex_coord))) {
+    if (tex_coord.x < -50000.0) { // primitiva sin textura (ver render::UNTEXTURED)
         frag_tex_coord = vec2(0.0);
         frag_blend = blend;
     } else {

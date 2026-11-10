@@ -109,3 +109,38 @@ jobs:
         with:
           name: reloaded-runner-bench-elf
           path: runner/target/armv7-sony-vita-newlibeabihf/release/gm8emulator.elf
+
+  vita-runner-gl:
+    name: Runner Vita con gráficos (vitaGL, experimental)
+    runs-on: ubuntu-24.04
+    container: vitasdk/vitasdk:latest
+    continue-on-error: true
+    steps:
+      - name: Herramientas base
+        run: apk add --no-cache git curl bash build-base cmake || (apt-get update && apt-get install -y git curl build-essential cmake)
+      - uses: actions/checkout@v4
+      - name: Rust nightly + cargo-vita
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Instalar cargo-vita
+        run: cargo install cargo-vita --locked
+      - name: Compilar VPK del runner con vitaGL
+        working-directory: runner/gm8emulator
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+          RUSTFLAGS: "-Zcrate-attr=feature(stdarch_arm_neon_intrinsics)"
+          CARGO_PROFILE_RELEASE_STRIP: "false"
+        shell: bash
+        run: |
+          if ! cargo vita build vpk -- --release --no-default-features --features vitagl 2>&1 | tee build.log; then
+            if grep -q "for SCE data at end of segment" build.log; then
+              RLD_ELF_PAD=1 cargo vita build vpk -- --release --no-default-features --features vitagl
+            else
+              exit 1
+            fi
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-runner-gl-vpk
+          path: runner/target/armv7-sony-vita-newlibeabihf/release/*.vpk

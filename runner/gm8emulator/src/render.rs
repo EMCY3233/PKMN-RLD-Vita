@@ -1,7 +1,10 @@
 //! Game rendering functionality
 
 pub mod atlas;
-#[cfg(feature = "desktop")]
+/// Coordenada de textura que marca una primitiva sin textura (antes NaN; ver simple_vertex.glsl)
+pub const UNTEXTURED: f32 = -100000.0;
+
+#[cfg(any(feature = "desktop", feature = "vitagl"))]
 pub mod opengl;
 #[cfg(not(feature = "desktop"))]
 pub mod null;
@@ -153,7 +156,7 @@ impl PrimitiveBuilder {
     }
 
     fn push_vertex(&mut self, pos: [f32; 3], tex_coord: [f32; 2], blend: [f32; 4], normal: [f32; 3]) -> &mut Self {
-        let tex_coord = if self.textured { tex_coord } else { [f32::NAN; 2] };
+        let tex_coord = if self.textured { tex_coord } else { [UNTEXTURED; 2] };
         self.push_vertex_raw(Vertex { pos, tex_coord, blend, normal, atlas_xywh: self.atlas_ref.into() });
         self
     }
@@ -585,11 +588,11 @@ impl Default for RendererOptions {
 
 impl Renderer {
     pub fn new(backend: (), connection: &Connection, options: &RendererOptions, window: &Window, clear_colour: Colour) -> Result<Self, String> {
-        #[cfg(feature = "desktop")]
+        #[cfg(any(feature = "desktop", feature = "vitagl"))]
         return Ok(Self(Box::new(match backend {
             () => opengl::RendererImpl::new(options, connection, window, clear_colour)?,
         })));
-        #[cfg(not(feature = "desktop"))]
+        #[cfg(not(any(feature = "desktop", feature = "vitagl")))]
         {
             let _ = (backend, connection, window, clear_colour);
             Ok(Self(Box::new(null::RendererImpl::new(options))))

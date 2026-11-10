@@ -40,6 +40,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         fs::write(aa_macro_path, &aa_macro)?;
     }
 
+    // PS Vita + vitaGL: librerías estáticas de VitaSDK
+    if env::var("TARGET").map_or(false, |t| t.contains("vita")) && env::var_os("CARGO_FEATURE_VITAGL").is_some() {
+        if let Ok(sdk) = env::var("VITASDK") {
+            println!("cargo:rustc-link-search=native={}/arm-vita-eabi/lib", sdk);
+        }
+        for lib in ["vitaGL", "vitashark", "SceShaccCgExt", "mathneon", "taihen_stub"] {
+            println!("cargo:rustc-link-lib=static={}", lib);
+        }
+    }
+
     // opengl bindings
     let mut bindings = File::create(&Path::new(&out).join("gl_bindings.rs"))?;
     Registry::new(Api::Gl, (3, 3), Profile::Core, Fallbacks::All, &OPENGL_EXTENSIONS)

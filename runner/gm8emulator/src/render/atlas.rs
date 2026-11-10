@@ -70,7 +70,7 @@ impl AtlasBuilder {
         }
         // Sin renderizador real (PS Vita, modo benchmark) los píxeles no se usan: liberarlos ya.
         // Así la memoria baja a medida que avanza el arranque en vez de acumularse.
-        #[cfg(not(feature = "desktop"))]
+        #[cfg(not(any(feature = "desktop", feature = "vitagl")))]
         let data: Box<[u8]> = { drop(data); Box::new([]) };
 
         if width > self.max_size || height > self.max_size {

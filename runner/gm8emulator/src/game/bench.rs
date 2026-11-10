@@ -165,6 +165,17 @@ impl Game {
     /// Se llama una vez por fotograma desde `run()`. Devuelve true cuando hay que terminar.
     pub fn bench_tick(&mut self) -> bool {
         let Some(mut b) = self.bench.take() else { return false };
+        // RLD_SHOTS=1600,2000: guardar capturas shot_<fotograma>.png (comparar renderizadores)
+        if let Ok(list) = std::env::var("RLD_SHOTS") {
+            if list.split(',').any(|f| f.trim().parse::<u64>().ok() == Some(b.frame)) {
+                self.renderer.flush_queue();
+                let (w, h) = (self.unscaled_width, self.unscaled_height);
+                let rgba = self.renderer.get_pixels(0, 0, w as _, h as _);
+                if let Some(img) = image::RgbaImage::from_vec(w, h, rgba.into()) {
+                    let _ = img.save(format!("shot_{}.png", b.frame));
+                }
+            }
+        }
         let now = Instant::now();
         let ms = now.duration_since(b.last_frame).as_secs_f64() * 1000.0;
         b.last_frame = now;
