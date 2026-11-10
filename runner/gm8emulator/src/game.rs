@@ -811,6 +811,7 @@ impl Game {
             temp_directory.pop();
         }
 
+        crate::startlog("  launch: antes de sonidos");
         let sounds = sounds
             .into_iter()
             .enumerate()
@@ -860,6 +861,7 @@ impl Game {
             })
             .collect::<Vec<_>>();
 
+        crate::startlog("  launch: antes de sprites");
         let sprites = sprites
             .into_iter()
             .map(|o| {
@@ -915,6 +917,7 @@ impl Game {
             .collect::<Result<Vec<_>, ()>>()
             .expect("failed to pack sprites");
 
+        crate::startlog("  launch: antes de fondos");
         let backgrounds = backgrounds
             .into_iter()
             .map(|o| {
@@ -936,6 +939,7 @@ impl Game {
             .collect::<Result<Vec<_>, ()>>()
             .expect("failed to pack backgrounds");
 
+        crate::startlog("  launch: antes de fuentes");
         let fonts = fonts
             .into_iter()
             .map(|o| {
@@ -1036,20 +1040,19 @@ impl Game {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        crate::startlog("  launch: antes de scripts");
         let scripts = scripts
             .into_iter()
             .map(|t| {
                 t.map(|b| {
-                    let compiled = match compiler.compile(&b.source.0) {
-                        Ok(s) => s,
-                        Err(e) => return Err(format!("Compiler error in script {}: {}", b.name, e)),
-                    };
-                    Ok(Box::new(Script { name: b.name.into(), source: b.source.into(), compiled }))
+                    // Compilación diferida: solo se registra el nombre (necesario para resolver llamadas)
+                    Ok::<_, String>(Box::new(Script { name: b.name.into(), source: b.source.into(), compiled: Default::default() }))
                 })
                 .transpose()
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        crate::startlog("  launch: antes de timelines");
         let timelines = timelines
             .into_iter()
             .map(|t| {
@@ -1071,6 +1074,7 @@ impl Game {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        crate::startlog("  launch: antes de objetos");
         let objects = {
             let mut object_parents: Vec<Option<i32>> = Vec::with_capacity(objects.len());
             let mut objects = objects
@@ -1144,6 +1148,7 @@ impl Game {
             objects
         };
 
+        crate::startlog("  launch: antes de salas");
         let rooms = rooms
             .into_iter()
             .map(|t| {
@@ -1274,7 +1279,9 @@ impl Game {
         let custom_draw_objects =
             event_holders[ev::DRAW].iter().flat_map(|(_, x)| x.borrow().iter().copied().collect::<Vec<_>>()).collect();
 
+        crate::startlog("  launch: antes de push_atlases");
         renderer.push_atlases(atlases)?;
+        crate::startlog("  launch: después de push_atlases");
 
         let mut game = Self {
             compiler,
@@ -3081,6 +3088,29 @@ impl Game {
                 }
             },
         }
+    }
+}
+
+impl Game {
+    /// Código compilado de una script; la compila la primera vez que se necesita.
+    pub fn script_code(&mut self, id: usize) -> gml::Result<std::rc::Rc<[crate::gml::runtime::Instruction]>> {
+        let src = match self.assets.scripts.get(id) {
+            Some(Some(s)) => {
+                if let Some(c) = s.compiled.get() {
+                    return Ok(c.clone())
+                }
+                s.source.clone()
+            },
+            _ => return Err(gml::Error::NonexistentAsset(asset::Type::Script, id as i32)),
+        };
+        let code = self
+            .compiler
+            .compile(src.as_ref())
+            .map_err(|e| gml::Error::FunctionError("script".into(), e.message))?;
+        if let Some(Some(s)) = self.assets.scripts.get(id) {
+            let _ = s.compiled.set(code.clone());
+        }
+        Ok(code)
     }
 }
 

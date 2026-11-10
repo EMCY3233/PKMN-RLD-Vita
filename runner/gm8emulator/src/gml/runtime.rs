@@ -642,8 +642,8 @@ impl Game {
                 function.0(&arg_values[..args.len()])
             },
             Node::Script { args, script_id } => {
-                if let Some(Some(script)) = self.assets.scripts.get(*script_id) {
-                    let instructions = script.compiled.clone();
+                if let Some(Some(_)) = self.assets.scripts.get(*script_id) {
+                    let instructions = self.script_code(*script_id)?;
 
                     let mut arg_values: [Value; 16] = Default::default();
                     for (src, dest) in args.iter().zip(arg_values.iter_mut()) {

@@ -3204,8 +3204,8 @@ impl Game {
 
     pub fn action_execute_script(&mut self, context: &mut Context, args: &[Value]) -> gml::Result<Value> {
         let (script_id, arg1, arg2, arg3, arg4, arg5) = expect_args!(args, [int, any, any, any, any, any])?;
-        if let Some(script) = self.assets.scripts.get_asset(script_id) {
-            let instructions = script.compiled.clone();
+        if self.assets.scripts.get_asset(script_id).is_some() {
+            let instructions = self.script_code(script_id as usize)?;
 
             let mut new_context = Context::copy_with_args(
                 context,
@@ -9360,7 +9360,7 @@ impl Game {
                 if *TRACE.get_or_init(|| std::env::var_os("RLD_TRACE").is_some()) {
                     eprintln!("[script] {} {} {:?}", script_id, String::from_utf8_lossy(script.name.as_ref()), &args[1..args.len().min(4)]);
                 }
-                let instructions = script.compiled.clone();
+                let instructions = self.script_code(script_id as usize)?;
                 let mut new_args: [Value; 16] = Default::default();
                 for (src, dest) in args[1..].iter().zip(new_args.iter_mut()) {
                     *dest = src.clone();

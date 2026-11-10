@@ -244,12 +244,12 @@ impl Game {
         if (transition_id > 0 && transition_id < 22) || self.user_transitions.contains_key(&transition_id) {
             Some(Box::new(move |game: &mut Game, surf_old, surf_new, width, height, progress| {
                 if let Some(transition) = game.user_transitions.get(&transition_id) {
-                    if let Some(Some(script)) = game
+                    let script_id = game
                         .compiler
                         .get_script_id(transition.script_name.as_ref())
-                        .and_then(|id| game.assets.scripts.get(id))
-                    {
-                        let instructions = script.compiled.clone();
+                        .filter(|id| matches!(game.assets.scripts.get(*id), Some(Some(_))));
+                    if let Some(script_id) = script_id {
+                        let instructions = game.script_code(script_id)?;
                         let dummy_instance = game
                             .room
                             .instance_list

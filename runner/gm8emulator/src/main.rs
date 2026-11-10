@@ -47,6 +47,13 @@ fn help(argv0: &str, opts: getopts::Options) {
 
 /// Registro de arranque: en Vita va a ux0:data/reloaded/runner.log (no hay consola).
 pub fn startlog(msg: &str) {
+    // En Linux, añade la memoria usada (actual y pico) para localizar picos de RAM
+    #[cfg(target_os = "linux")]
+    let msg = &{
+        let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let g = |k: &str| st.lines().find(|l| l.starts_with(k)).map(|l| l.split_whitespace().nth(1).unwrap_or("0").parse::<u64>().unwrap_or(0) / 1024).unwrap_or(0);
+        format!("{msg}   [RAM {} MB, pico {} MB]", g("VmRSS"), g("VmHWM"))
+    };
     eprintln!("{msg}");
     #[cfg(target_os = "vita")]
     {
@@ -262,7 +269,12 @@ fn xmain() -> i32 {
         multithread,                            // multithread: bool
     );
     let assets = match assets {
-        Ok(assets) => { startlog("Juego leído y descomprimido"); assets },
+        Ok(assets) => {
+            // El .exe ya no hace falta: liberar sus 22 MB cuanto antes (importante en PS Vita)
+            drop(std::mem::take(&mut file));
+            startlog("Juego leído y descomprimido");
+            assets
+        },
         Err(err) => {
             startlog(&format!("ERROR al leer el juego '{}' - {}", input, err));
             return EXIT_FAILURE;
