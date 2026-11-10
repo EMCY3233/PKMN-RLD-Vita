@@ -15,7 +15,7 @@ runner que la Vita); la estimación para Vita usa la proporción medida en conso
 | Carrera Pokémon | PokemonRace (99), RaceN1 (92) | ControlRace | No | 1122 / 671 → ~47 / ~28 | ✅ (RaceN1 al límite; mejorará con el renderizador en GPU) |
 | FlyGol | PokemonFlyGol (300), _Playing (301) | ControlFlyGol, ControlTorneoFlygol | No (flechas, E) | 959 / 780 → ~40 / ~32 | ✅ |
 | Dojo Marte | PokemonDojo (342), _Playing (343) | — | No (Z) | 942 / 1342 → ~39 / ~56 | ✅ |
-| Zona Safari | ZonaSafari (145) y salas Safari | — (1235 instancias de hierba) | No | **382 → 571** (tras optimizar) → ~24 | ⚠️ Sala más pesada medida; ver "Rendimiento" |
+| Zona Safari | ZonaSafari (145) y salas Safari | — (1235 instancias de hierba) | No | **382 → 847** (tras optimizar) → ~35 | ✅ Sala más pesada medida; ver "Rendimiento" |
 | Casino | CasinoPolar (165) | — | No | 1075 → ~45 | ✅ |
 | Torre de batalla | Torre_Piso (548), Torre_Batalla (550) | — | No | 2432 → ~101 | ✅ |
 | Concurso de Bichos | (objeto ObjectConcursoBichos) | ConcursoBichos* | No | — | ✅ Sin funciones especiales (solo `sleep`) |
@@ -62,9 +62,10 @@ La Zona Safari (1235 instancias) mostró que ~17 % del tiempo se iba en el hash 
 
 | Sala | Antes | Después |
 |---|---|---|
-| Zona Safari | 382 FPS | 571 FPS (+49 %) |
+| Zona Safari | 382 FPS | 571 FPS (+49 %); 847 FPS con `InstanceInView` nativo |
 | Casa del protagonista | 2458 FPS | 3800 FPS (+55 %) |
 | Recorrido completo del benchmark | 3,9 s | 3,2 s |
 
-El resto del coste en salas grandes es el intérprete (`eval`, `event_inherited`: la hierba hereda
-eventos de su padre). Siguiente paso posible: caché de la búsqueda de eventos heredados.
+Después, `InstanceInView`/`FlowerVisible` (≈1100 llamadas por fotograma: cada flor y hierba comprueba
+si está en pantalla) pasan a una función nativa con las mismas operaciones (738 casos de autoprueba
+idénticos): Safari 571 → 847 FPS. El resto es el intérprete en general.
