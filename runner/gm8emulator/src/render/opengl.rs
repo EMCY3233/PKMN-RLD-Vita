@@ -203,6 +203,7 @@ pub struct RendererImpl {
     primitive_3d: PrimitiveBuilder,
 
     simple: Option<SimpleUniforms>,
+    lazy: LazyTextures,
     loc_gm81_normalize: GLint, // uniform bool gm81_normalize
     loc_tex: GLint,            // uniform sampler2D tex
     buf_state: GLuint,         // uniform RenderState state
@@ -238,6 +239,35 @@ fn simple_shader_source(src: &str, fragment: bool) -> std::ffi::CString {
     };
     std::ffi::CString::new(format!("{}{}", prelude, src)).unwrap()
 }
+
+/// Texturas de carga diferida (PS Vita): los sprites del juego no caben a la vez en la memoria
+/// gráfica (178 MB en RGBA frente a 112 MB de VRAM), así que se descomprimen al dibujarlos por
+/// primera vez y se colocan en páginas de 1024×1024. Si se supera el presupuesto, se vacía la
+/// página usada hace más tiempo (sus sprites se volverán a cargar si hacen falta).
+#[derive(Default)]
+struct LazyTextures {
+    provider: Option<crate::render::LazyProvider>,
+    /// AtlasRef → es diferida
+    is_lazy: Vec<bool>,
+    /// AtlasRef → página en la que está cargada (u32::MAX = no cargada)
+    page_of: Vec<u32>,
+    pages: Vec<LazyPage>,
+    frame: u64,
+    budget_bytes: usize,
+    used_bytes: usize,
+    loads: u64,
+    evictions: u64,
+}
+
+struct LazyPage {
+    atlas_id: u32,
+    packer: DensePacker,
+    size: (i32, i32),
+    ids: Vec<i32>,
+    last_used: u64,
+}
+
+const LAZY_PAGE: i32 = 1024;
 
 /// Ubicaciones de los uniforms del shader simplificado
 #[derive(Clone, Copy, Default)]
@@ -689,6 +719,15 @@ impl RendererImpl {
                 primitive_3d: PrimitiveBuilder::new(Default::default(), PrimitiveType::PointList, false),
 
                 simple: simple_uniforms,
+                lazy: LazyTextures {
+                    budget_bytes: std::env::var("RLD_TEX_BUDGET_MB")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(if cfg!(target_os = "vita") { 72 } else { 4096 })
+                        * 1024
+                        * 1024,
+                    ..Default::default()
+                },
                 loc_gm81_normalize: gl.GetUniformLocation(program, b"gm81_normalize\0".as_ptr().cast()),
                 loc_tex: gl.GetUniformLocation(program, b"tex\0".as_ptr().cast()),
                 buf_state,
@@ -711,6 +750,141 @@ impl RendererImpl {
                 0 => Ok(renderer),
                 err => Err(format!("Failed to fully initialize OpenGL! (OpenGL code {})", err)),
             }
+        }
+    }
+
+    /// Carga en la GPU una textura diferida si aún no lo está (y la marca como usada)
+    fn ensure(&mut self, atlas_ref: AtlasRef) {
+        let Ok(i) = usize::try_from(atlas_ref.0) else { return };
+        if !self.lazy.is_lazy.get(i).copied().unwrap_or(false) {
+            return
+        }
+        let page = self.lazy.page_of[i];
+        if page != u32::MAX {
+            self.lazy.pages[page as usize].last_used = self.lazy.frame;
+            return
+        }
+        let Some(mut provider) = self.lazy.provider.take() else { return };
+        let loaded = provider(atlas_ref);
+        self.lazy.provider = Some(provider);
+        self.lazy.loads += 1;
+        for (r, pixels) in loaded {
+            let Ok(j) = usize::try_from(r.0) else { continue };
+            if !self.lazy.is_lazy.get(j).copied().unwrap_or(false) || self.lazy.page_of[j] != u32::MAX {
+                continue
+            }
+            let Some(rect) = self.texture_rects[j] else { continue };
+            if pixels.len() != (rect.w * rect.h * 4) as usize {
+                continue
+            }
+            self.upload_lazy(j, rect, &pixels);
+        }
+    }
+
+    fn upload_lazy(&mut self, id: usize, rect: AtlasRect, pixels: &[u8]) {
+        let (w, h) = (rect.w, rect.h);
+        let frame = self.lazy.frame;
+        // 1) hueco en una página existente
+        let mut found = None;
+        for (pi, p) in self.lazy.pages.iter_mut().enumerate() {
+            if let Some(r) = p.packer.pack(w, h, false) {
+                found = Some((pi, r));
+                break
+            }
+        }
+        // 2) vaciar la página usada hace más tiempo (si no cabe otra en el presupuesto)
+        if found.is_none() {
+            let need = {
+                let pw = LAZY_PAGE.max((w as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
+                let ph = LAZY_PAGE.max((h as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
+                (pw, ph)
+            };
+            if self.lazy.used_bytes + (need.0 * need.1 * 4) as usize > self.lazy.budget_bytes {
+                let victim = self
+                    .lazy
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.last_used < frame && p.size.0 >= w && p.size.1 >= h)
+                    .min_by_key(|(_, p)| p.last_used)
+                    .map(|(i, _)| i);
+                if let Some(v) = victim {
+                    self.flush_queue();
+                    let page = &mut self.lazy.pages[v];
+                    for &old in &page.ids {
+                        self.lazy.page_of[old as usize] = u32::MAX;
+                        if let Some(r) = self.texture_rects[old as usize].as_mut() {
+                            r.atlas_id = crate::render::atlas::LAZY_UNLOADED;
+                        }
+                    }
+                    page.ids.clear();
+                    page.packer = DensePacker::new(page.size.0, page.size.1);
+                    self.lazy.evictions += 1;
+                    if self.lazy.evictions <= 3 || self.lazy.evictions % 100 == 0 {
+                        crate::startlog(&format!(
+                            "Texturas: página vaciada (vaciados: {}, cargas: {}, {} MB en uso)",
+                            self.lazy.evictions,
+                            self.lazy.loads,
+                            self.lazy.used_bytes / 1048576
+                        ));
+                    }
+                    if let Some(r) = page.packer.pack(w, h, false) {
+                        found = Some((v, r));
+                    }
+                }
+            }
+            // 3) página nueva (también si todo lo cargado se usa en este mismo fotograma)
+            if found.is_none() {
+                let (pw, ph) = need;
+                let mut tex = 0;
+                unsafe {
+                    self.flush_queue();
+                    self.gl.GenTextures(1, &mut tex);
+                    self.gl.BindTexture(gl::TEXTURE_2D, tex);
+                    self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as _);
+                    self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as _);
+                    self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::REPEAT as _);
+                    self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::REPEAT as _);
+                    self.gl.TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA as _, pw, ph, 0, gl::BGRA, gl::UNSIGNED_BYTE, ptr::null());
+                }
+                let atlas_id = self.texture_ids.len() as u32;
+                self.texture_ids.push(Some(tex));
+                self.fbo_ids.resize(self.texture_ids.len(), None);
+                self.zbuf_ids.resize(self.texture_ids.len(), None);
+                self.lazy.used_bytes += (pw * ph * 4) as usize;
+                let mut packer = DensePacker::new(pw, ph);
+                let r = packer.pack(w, h, false);
+                self.lazy.pages.push(LazyPage { atlas_id, packer, size: (pw, ph), ids: Vec::new(), last_used: frame });
+                match r {
+                    Some(r) => found = Some((self.lazy.pages.len() - 1, r)),
+                    None => return, // más grande que la textura máxima: no se puede dibujar
+                }
+            }
+        }
+        let Some((pi, r)) = found else { return };
+        let page = &mut self.lazy.pages[pi];
+        page.ids.push(id as i32);
+        page.last_used = frame;
+        let atlas_id = page.atlas_id;
+        self.lazy.page_of[id] = pi as u32;
+        unsafe {
+            self.gl.BindTexture(gl::TEXTURE_2D, self.texture_ids[atlas_id as usize].unwrap());
+            self.gl.TexSubImage2D(
+                gl::TEXTURE_2D,
+                0,
+                r.x,
+                r.y,
+                w,
+                h,
+                gl::BGRA,
+                gl::UNSIGNED_BYTE,
+                pixels.as_ptr().cast(),
+            );
+        }
+        if let Some(t) = self.texture_rects[id].as_mut() {
+            t.atlas_id = atlas_id;
+            t.x = r.x;
+            t.y = r.y;
         }
     }
 
@@ -949,6 +1123,9 @@ impl RendererTrait for RendererImpl {
 
             // upload textures
             for (atl_ref, pixels) in &sprites {
+                if atl_ref.atlas_id == crate::render::atlas::LAZY_UNLOADED {
+                    continue
+                }
                 if self.current_atlas != atl_ref.atlas_id {
                     self.gl.BindTexture(gl::TEXTURE_2D, textures[atl_ref.atlas_id as usize]);
                     self.current_atlas = atl_ref.atlas_id;
@@ -999,6 +1176,15 @@ impl RendererTrait for RendererImpl {
 
         // store packers, discard pixeldata
         self.atlas_packers = packers;
+        self.lazy.is_lazy = sprites.iter().map(|(ar, _)| ar.atlas_id == crate::render::atlas::LAZY_UNLOADED).collect();
+        self.lazy.page_of = vec![u32::MAX; sprites.len()];
+        if self.lazy.is_lazy.iter().any(|&l| l) {
+            crate::startlog(&format!(
+                "Texturas diferidas: {} (presupuesto {} MB)",
+                self.lazy.is_lazy.iter().filter(|&&l| l).count(),
+                self.lazy.budget_bytes / 1048576
+            ));
+        }
         self.texture_rects = sprites.drain(..).map(|(ar, _)| Some(ar)).collect();
         self.stock_texture_count = self.texture_rects.len();
 
@@ -1052,6 +1238,7 @@ impl RendererTrait for RendererImpl {
     }
 
     fn duplicate_sprite(&mut self, atlas_ref: AtlasRef) -> Result<AtlasRef, String> {
+        self.ensure(atlas_ref);
         if let Some(rect) = self.get_rect(atlas_ref).cloned() {
             let sprite = self.create_surface(rect.w, rect.h, false)?;
             let new_rect = self.get_rect_mut(sprite).unwrap();
@@ -1088,6 +1275,18 @@ impl RendererTrait for RendererImpl {
     fn delete_sprite(&mut self, atlas_ref: AtlasRef) {
         // this only deletes sprites created with upload_sprite
         self.flush_queue();
+        if let Ok(i) = usize::try_from(atlas_ref.0) {
+            if self.lazy.is_lazy.get(i).copied().unwrap_or(false) {
+                // textura diferida: deja de existir, pero la página es compartida y no se borra
+                self.lazy.is_lazy[i] = false;
+                if let Some(p) = self.lazy.page_of.get(i).copied().filter(|&p| p != u32::MAX) {
+                    self.lazy.pages[p as usize].ids.retain(|&x| x != atlas_ref.0);
+                    self.lazy.page_of[i] = u32::MAX;
+                }
+                self.texture_rects[i] = None;
+                return
+            }
+        }
         if let Some(rect) = atlas_ref
             .0
             .try_into()
@@ -1787,6 +1986,10 @@ impl RendererTrait for RendererImpl {
             .and_then(|o: &Option<AtlasRect>| o.as_ref())
     }
 
+    fn set_lazy_provider(&mut self, provider: crate::render::LazyProvider) {
+        self.lazy.provider = Some(provider);
+    }
+
     fn draw_sprite_general(
         &mut self,
         texture: AtlasRef,
@@ -1806,6 +2009,7 @@ impl RendererTrait for RendererImpl {
         alpha: f64,
         use_origin: bool,
     ) {
+        self.ensure(texture);
         let atlas_ref = match self.get_rect(texture) {
             Some(rect) => *rect,
             None => return,
@@ -1871,6 +2075,7 @@ impl RendererTrait for RendererImpl {
         y4: f64,
         alpha: f64,
     ) {
+        self.ensure(texture);
         let atlas_ref = match self.get_rect(texture) {
             Some(rect) => *rect,
             None => return,
@@ -2072,6 +2277,9 @@ impl RendererTrait for RendererImpl {
     }
 
     fn reset_primitive_2d(&mut self, ptype: PrimitiveType, atlas_ref: Option<AtlasRef>) {
+        if let Some(a) = atlas_ref {
+            self.ensure(a);
+        }
         let ar = atlas_ref.and_then(|ar| self.get_rect(ar).copied());
         self.primitive_2d = PrimitiveBuilder::new(
             ar.unwrap_or(self.white_pixel),
@@ -2104,6 +2312,9 @@ impl RendererTrait for RendererImpl {
     }
 
     fn reset_primitive_3d(&mut self, ptype: PrimitiveType, atlas_ref: Option<AtlasRef>) {
+        if let Some(a) = atlas_ref {
+            self.ensure(a);
+        }
         let ar = atlas_ref.and_then(|ar| self.get_rect(ar).copied());
         self.primitive_3d = PrimitiveBuilder::new(
             ar.unwrap_or(self.white_pixel),
@@ -2157,6 +2368,9 @@ impl RendererTrait for RendererImpl {
     }
 
     fn draw_buffers(&mut self, atlas_ref: Option<AtlasRef>, buf: &VertexBuffer) {
+        if let Some(a) = atlas_ref {
+            self.ensure(a);
+        }
         // TODO: bench this method vs copying the buffer onto the draw queue
         self.flush_queue();
         self.update_render_state();
@@ -2592,6 +2806,7 @@ impl RendererTrait for RendererImpl {
             // Present buffer
             // Note: Game Maker always presents the backbuffer, even when the target is a surface.
             self.imp.swap_buffers();
+            self.lazy.frame += 1;
 
             // On Nvidia/AMD cards, unless the emulator is running in admin mode, if it is screenshared on Discord,
             // SwapBuffers will return TRUE i.e. no error, but glGetError will return GL_INVALID_OPERATION.

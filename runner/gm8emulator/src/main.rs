@@ -85,6 +85,11 @@ fn main() {
     // Sin renderizador real no hacen falta los píxeles de sprites/fondos: no guardarlos (~190 MB)
     #[cfg(not(any(feature = "desktop", feature = "vitagl")))]
     gm8exe::SKIP_PIXELS.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Con gráficos en Vita (o RLD_LAZY_TEX=1 en PC): texturas bajo demanda en vez de todas en memoria
+    if cfg!(feature = "vitagl") || std::env::var_os("RLD_LAZY_TEX").is_some() {
+        gm8exe::SKIP_PIXELS.store(true, std::sync::atomic::Ordering::Relaxed);
+        gm8exe::LAZY_PIXELS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // El intérprete de GML es recursivo: en PS Vita el hilo principal solo tiene ~256 KB de pila y
     // el juego la desbordaba en la selección de personaje. Se ejecuta en un hilo con 16 MB.
     let code = std::thread::Builder::new()

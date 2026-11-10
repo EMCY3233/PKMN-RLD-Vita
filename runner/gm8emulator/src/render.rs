@@ -4,6 +4,8 @@ pub mod atlas;
 /// Coordenada de textura que marca una primitiva sin textura (antes NaN; ver simple_vertex.glsl)
 pub const UNTEXTURED: f32 = -100000.0;
 
+pub type LazyProvider = Box<dyn FnMut(AtlasRef) -> Vec<(AtlasRef, Box<[u8]>)>>;
+
 #[cfg(any(feature = "desktop", feature = "vitagl"))]
 pub mod opengl;
 #[cfg(not(feature = "desktop"))]
@@ -237,6 +239,10 @@ pub trait RendererTrait {
     fn wait_vsync(&self);
 
     fn get_rect(&self, id: AtlasRef) -> Option<&AtlasRect>;
+
+    /// Proveedor de píxeles para texturas diferidas: dado un AtlasRef devuelve sus píxeles BGRA
+    /// (y, si conviene, los de texturas hermanas: todos los fotogramas del mismo sprite)
+    fn set_lazy_provider(&mut self, _provider: LazyProvider) {}
 
     fn draw_sprite(&mut self, tex: AtlasRef, x: f64, y: f64, xs: f64, ys: f64, ang: f64, col: i32, alpha: f64) {
         if let Some(rect) = self.get_rect(tex) {
@@ -624,6 +630,10 @@ impl Renderer {
 
     pub fn delete_sprite(&mut self, atlas_ref: AtlasRef) {
         self.0.delete_sprite(atlas_ref)
+    }
+
+    pub fn set_lazy_provider(&mut self, provider: LazyProvider) {
+        self.0.set_lazy_provider(provider)
     }
 
     pub fn check_texture_id(&self, id: i32) -> bool {

@@ -6,6 +6,9 @@ fn next_pow2(n: i32) -> i32 {
     2i32.pow((n as f32).log2().ceil() as _)
 }
 
+/// atlas_id de una textura diferida que aún no está en la GPU
+pub const LAZY_UNLOADED: u32 = u32::MAX;
+
 pub struct AtlasBuilder {
     max_size: i32,
     packers: Vec<DensePacker>,
@@ -107,6 +110,28 @@ impl AtlasBuilder {
         let size = 4096.min(self.max_size);
         self.packers.push(DensePacker::new(size, size));
         self.texture(width, height, origin_x, origin_y, data)
+    }
+
+    /// Reserva una textura de carga diferida: el renderizador pedirá sus píxeles la primera vez
+    /// que se dibuje (ver `RendererTrait::set_lazy_provider`). `atlas_id` = LAZY_UNLOADED.
+    pub fn lazy_texture(&mut self, width: i32, height: i32, origin_x: i32, origin_y: i32) -> AtlasRef {
+        if width <= 0 || height <= 0 {
+            return AtlasRef(-1)
+        }
+        let id = self.textures.len() as i32;
+        self.textures.push((
+            AtlasRect {
+                atlas_id: LAZY_UNLOADED,
+                x: 0,
+                y: 0,
+                w: width,
+                h: height,
+                origin_x: origin_x as f32 / width as f32,
+                origin_y: origin_y as f32 / height as f32,
+            },
+            Box::new([]),
+        ));
+        AtlasRef(id)
     }
 
     #[allow(clippy::type_complexity)] // It's for the Renderer only.

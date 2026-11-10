@@ -869,9 +869,14 @@ impl Game {
             .collect::<Vec<_>>();
 
         crate::startlog("  launch: antes de sprites");
+        // Texturas diferidas: los píxeles se piden al dibujar (ver gm8exe::LAZY_PIXELS)
+        let lazy = gm8exe::LAZY_PIXELS.load(std::sync::atomic::Ordering::Relaxed);
+        // AtlasRef → (es fondo, índice del recurso, fotograma)
+        let mut lazy_map: Vec<(i32, bool, u32, u32)> = Vec::new();
         let sprites = sprites
             .into_iter()
-            .map(|o| {
+            .enumerate()
+            .map(|(sprite_index, o)| {
                 o.map(|b| {
                     let (w, h) = b.frames.first().map_or((0, 0), |f| (f.width, f.height));
                     let origin_x = b.origin_x;
@@ -885,14 +890,16 @@ impl Game {
                         frames: b
                             .frames
                             .into_iter()
-                            .map(|f| {
-                                Ok(Frame {
-                                    width: f.width,
-                                    height: f.height,
-                                    atlas_ref: atlases
-                                        .texture(f.width as _, f.height as _, origin_x, origin_y, f.data)
-                                        .ok_or(())?,
-                                })
+                            .enumerate()
+                            .map(|(frame_index, f)| {
+                                let atlas_ref = if lazy {
+                                    let r = atlases.lazy_texture(f.width as _, f.height as _, origin_x, origin_y);
+                                    lazy_map.push((r.0, false, sprite_index as u32, frame_index as u32));
+                                    r
+                                } else {
+                                    atlases.texture(f.width as _, f.height as _, origin_x, origin_y, f.data).ok_or(())?
+                                };
+                                Ok(Frame { width: f.width, height: f.height, atlas_ref })
                             })
                             .collect::<Result<_, ()>>()?,
                         colliders: b
@@ -927,15 +934,22 @@ impl Game {
         crate::startlog("  launch: antes de fondos");
         let backgrounds = backgrounds
             .into_iter()
-            .map(|o| {
+            .enumerate()
+            .map(|(bg_index, o)| {
                 o.map(|b| {
                     let width = b.width;
                     let height = b.height;
+                    let bg_data = b.data;
                     Ok(Box::new(asset::Background {
                         name: b.name.into(),
                         width,
                         height,
-                        atlas_ref: match b.data {
+                        atlas_ref: match bg_data {
+                            Some(_) if lazy => {
+                                let r = atlases.lazy_texture(width as _, height as _, 0, 0);
+                                lazy_map.push((r.0, true, bg_index as u32, 0));
+                                Some(r)
+                            },
                             Some(data) => Some(atlases.texture(width as _, height as _, 0, 0, data).ok_or(())?),
                             None => None,
                         },
@@ -1288,6 +1302,9 @@ impl Game {
 
         crate::startlog("  launch: antes de push_atlases");
         renderer.push_atlases(atlases)?;
+        if lazy {
+            renderer.set_lazy_provider(make_lazy_provider(lazy_map));
+        }
         crate::startlog("  launch: después de push_atlases");
 
         let mut game = Self {
@@ -3156,4 +3173,33 @@ impl<T> GetAsset<T> for Vec<Option<T>> {
     fn get_asset_mut(&mut self, index: ID) -> Option<&mut T> {
         self.get_mut(usize::try_from(index).ok()?)?.as_mut()
     }
+}
+
+
+/// Proveedor de texturas diferidas: descomprime el sprite (todos sus fotogramas a la vez, porque
+/// se suelen dibujar seguidos) o el fondo al que pertenece la textura pedida.
+fn make_lazy_provider(map: Vec<(i32, bool, u32, u32)>) -> crate::render::LazyProvider {
+    use crate::render::atlas::AtlasRef;
+    use std::collections::HashMap;
+    let by_ref: HashMap<i32, (bool, u32, u32)> = map.iter().map(|&(r, bg, i, f)| (r, (bg, i, f))).collect();
+    let mut by_sprite: HashMap<u32, Vec<(u32, i32)>> = HashMap::new();
+    for &(r, bg, i, f) in &map {
+        if !bg {
+            by_sprite.entry(i).or_default().push((f, r));
+        }
+    }
+    Box::new(move |r: AtlasRef| {
+        let Some(&(bg, index, _)) = by_ref.get(&r.0) else { return Vec::new() };
+        if bg {
+            gm8exe::lazy_background_pixels(index as usize).map(|p| vec![(r, p)]).unwrap_or_default()
+        } else {
+            let Some(frames) = gm8exe::lazy_sprite_frames(index as usize) else { return Vec::new() };
+            let refs = by_sprite.get(&index).cloned().unwrap_or_default();
+            frames
+                .into_iter()
+                .enumerate()
+                .filter_map(|(fi, px)| refs.iter().find(|(f, _)| *f as usize == fi).map(|&(_, rr)| (AtlasRef(rr), px)))
+                .collect()
+        }
+    })
 }

@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Ok(sdk) = env::var("VITASDK") {
             println!("cargo:rustc-link-search=native={}/arm-vita-eabi/lib", sdk);
         }
-        for lib in ["vitaGL", "vitashark", "SceShaccCgExt", "mathneon", "taihen_stub"] {
+        for lib in ["vitaGL", "vitashark", "SceShaccCgExt", "mathneon", "taihen_stub", "stdc++"] {
             println!("cargo:rustc-link-lib=static={}", lib);
         }
     }

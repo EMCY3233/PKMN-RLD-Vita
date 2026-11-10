@@ -525,6 +525,12 @@ where
 
     // Sprites
     assert_ver!("sprites header", 800, exe.read_u32::<LE>()?)?;
+    if crate::LAZY_PIXELS.load(std::sync::atomic::Ordering::Relaxed) {
+        let pos = exe.position();
+        let chunks = get_asset_refs(&mut exe)?.into_iter().map(|c| Box::<[u8]>::from(c)).collect();
+        *crate::LAZY_SPRITE_CHUNKS.lock().unwrap() = chunks;
+        exe.set_position(pos);
+    }
     let sprites: AssetList<Sprite> = get_assets_ex(&mut exe, game_ver, strict, multithread)?;
     if logger.is_some() {
         sprites.iter().flatten().for_each(|sprite| {
@@ -547,6 +553,12 @@ where
 
     // Backgrounds
     assert_ver!("backgrounds header", 800, exe.read_u32::<LE>()?)?;
+    if crate::LAZY_PIXELS.load(std::sync::atomic::Ordering::Relaxed) {
+        let pos = exe.position();
+        let chunks = get_asset_refs(&mut exe)?.into_iter().map(|c| Box::<[u8]>::from(c)).collect();
+        *crate::LAZY_BACKGROUND_CHUNKS.lock().unwrap() = chunks;
+        exe.set_position(pos);
+    }
     let backgrounds: AssetList<Background> = get_assets_ex(&mut exe, game_ver, strict, multithread)?;
     if logger.is_some() {
         backgrounds.iter().flatten().for_each(|background| {
