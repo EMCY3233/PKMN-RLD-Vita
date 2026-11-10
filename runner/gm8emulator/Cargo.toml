@@ -9,7 +9,7 @@ default-run = "gm8emulator"
 
 [package.metadata.vita]
 title_id = "PKRLD0002"
-title_name = "Reloaded Runner (bench)"
+title_name = "Reloaded Runner Bench"
 
 [features]
 default = ["desktop"]

@@ -45,8 +45,29 @@ fn help(argv0: &str, opts: getopts::Options) {
     );
 }
 
+/// Registro de arranque: en Vita va a ux0:data/reloaded/runner.log (no hay consola).
+pub fn startlog(msg: &str) {
+    eprintln!("{msg}");
+    #[cfg(target_os = "vita")]
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(format!("{VITA_DIR}/runner.log")) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
 fn main() {
-    process::exit(xmain());
+    #[cfg(target_os = "vita")]
+    {
+        let _ = std::fs::create_dir_all(VITA_DIR);
+        let _ = std::fs::remove_file(format!("{VITA_DIR}/runner.log"));
+    }
+    std::panic::set_hook(Box::new(|info| startlog(&format!("PANIC: {info}"))));
+    startlog(&format!("Reloaded Runner {} ({}) arrancando", env!("CARGO_PKG_VERSION"), std::env::consts::OS));
+    let code = xmain();
+    startlog(&format!("Fin (código {code})"));
+    process::exit(code);
 }
 
 /// Carpeta del juego en la PS Vita
@@ -216,10 +237,11 @@ fn xmain() -> i32 {
 
     let file_path = Path::new(&input);
 
+    startlog(&format!("Leyendo {}", input));
     let mut file = match fs::read(file_path) {
         Ok(data) => data,
         Err(err) => {
-            eprintln!("failed to open '{}': {}", input, err);
+            startlog(&format!("ERROR: no se puede abrir '{}': {}", input, err));
             return EXIT_FAILURE;
         },
     };
@@ -240,9 +262,9 @@ fn xmain() -> i32 {
         multithread,                            // multithread: bool
     );
     let assets = match assets {
-        Ok(assets) => assets,
+        Ok(assets) => { startlog("Juego leído y descomprimido"); assets },
         Err(err) => {
-            eprintln!("failed to load '{}' - {}", input, err);
+            startlog(&format!("ERROR al leer el juego '{}' - {}", input, err));
             return EXIT_FAILURE;
         },
     };
@@ -286,9 +308,9 @@ fn xmain() -> i32 {
         capture_recording,
         play_type,
     ) {
-        Ok(g) => g,
+        Ok(g) => { startlog("Juego iniciado; empieza el benchmark"); g },
         Err(e) => {
-            eprintln!("Failed to launch game: {}", e);
+            startlog(&format!("ERROR al iniciar el juego: {}", e));
             return EXIT_FAILURE;
         },
     };
@@ -333,7 +355,7 @@ fn xmain() -> i32 {
         }
         result
     } {
-        println!("Runtime error: {}", err);
+        startlog(&format!("Error durante la ejecución: {}", err));
         EXIT_FAILURE
     } else {
         EXIT_SUCCESS
