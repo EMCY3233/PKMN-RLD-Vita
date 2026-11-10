@@ -70,7 +70,7 @@ jobs:
         working-directory: runner/gm8emulator
         env:
           RUSTUP_TOOLCHAIN: nightly
-        run: cargo vita build vpk --release -- --no-default-features --features vita
+        run: cargo vita build vpk -- --release --no-default-features --features vita
       - uses: actions/upload-artifact@v4
         with:
           name: reloaded-runner-bench-vpk
