@@ -85,7 +85,17 @@ fn main() {
     // Sin renderizador real no hacen falta los píxeles de sprites/fondos: no guardarlos (~190 MB)
     #[cfg(not(feature = "desktop"))]
     gm8exe::SKIP_PIXELS.store(true, std::sync::atomic::Ordering::Relaxed);
-    let code = xmain();
+    // El intérprete de GML es recursivo: en PS Vita el hilo principal solo tiene ~256 KB de pila y
+    // el juego la desbordaba en la selección de personaje. Se ejecuta en un hilo con 16 MB.
+    let code = std::thread::Builder::new()
+        .name("runner".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(xmain)
+        .and_then(|h| h.join().map_err(|_| std::io::Error::other("el hilo del runner terminó con un panic")))
+        .unwrap_or_else(|e| {
+            startlog(&format!("ERROR: {e}"));
+            EXIT_FAILURE
+        });
     startlog(&format!("Fin (código {code})"));
     process::exit(code);
 }
@@ -98,7 +108,7 @@ const VITA_DIR: &str = "ux0:data/reloaded";
 #[cfg(target_os = "vita")]
 #[used]
 #[no_mangle]
-pub static _newlib_heap_size_user: u32 = 340 * 1024 * 1024;
+pub static _newlib_heap_size_user: u32 = 280 * 1024 * 1024;
 
 fn xmain() -> i32 {
     #[cfg(not(target_os = "vita"))]
