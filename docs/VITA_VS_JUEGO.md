@@ -29,4 +29,8 @@
 3. **Texturas comprimidas o bajo demanda**: 178 MB no caben en 112 MB de VRAM. Opciones: RGBA4444/RGB5A1 (mitad de tamaño),
    PVRTC/DXT (1/4–1/8), o cargar sprites al entrar en cada sala y descargar los que no se usan.
 4. **Rendimiento**: overclock a 444 MHz, compilar con LTO y medir FPS por sala; optimizar el intérprete GML si hace falta.
-5. **Ya probado**: la Vita lee el .exe de 22 MB en 1,9 s.
+5. **Probado en consola (loader-test v2)**: lee el .exe en 1,9 s y lo **parsea entero en 24,8 s** (PC: 0,97 s → la Vita es ~25× más lenta
+   en este trabajo, a 333 MHz y con un solo núcleo). Con 340 MB de heap no hay problemas de memoria.
+6. **Tiempo de carga**: 25 s es demasiado para cada arranque. Plan: preprocesar el juego en el PC (en `update_port.sh`) a un paquete
+   ya descomprimido y con texturas en formato de GPU, y usar los 3 núcleos + overclock a 444 MHz.
+7. **Prueba decisiva pendiente**: velocidad del intérprete GML en la consola (FPS reales por sala).
