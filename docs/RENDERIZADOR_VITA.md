@@ -38,7 +38,7 @@ panel trasero = teclas 1-4.
 ## Pendiente
 
 - Probar en consola: compilación de shaders, imagen, velocidad, memoria.
-- Audio (de momento sin sonido).
+- Audio: salida sceAudioOut (udon/session/vita.rs, puerto BGM 48 kHz, hilo en el núcleo 1). Música MIDI con rustysynth (22 050 Hz, 32 voces, sin reverberación) y SoundFont TimGM6mb en el VPK (sustituible en ux0:data/reloaded/soundfont.sf2). sound_replace siempre carga el archivo nuevo.
 - `show_image`/`show_info` (ventanas informativas).
 - Presentación: escala entera si cabe al menos x2 (320x180 -> x3); si no (combate 576x324), ajustada a 960x540. Registro de rendimiento cada 5 s en runner.log (FPS, ms de lógica y de dibujo, sala).
 
