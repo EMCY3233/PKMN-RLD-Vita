@@ -5,6 +5,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Un envío a una rama con pull request abierto lanzaba dos compilaciones idénticas (push y pull_request):
+# la más reciente cancela a la otra, así cada cambio gasta la mitad de minutos de Actions.
+concurrency:
+  group: build-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   linux-runner:
     name: Runner (Linux)
