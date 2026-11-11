@@ -94,10 +94,18 @@ struct Keymap {
     layer_l: HashMap<Btn, u8>,
     layer_r: HashMap<Btn, u8>,
     rear: [u8; 4],
+    /// combinaciones: botones que hay que mantener a la vez → teclas que se pulsan juntas
+    combos: Vec<(Vec<Btn>, Vec<u8>)>,
 }
 
 fn parse(text: &str) -> Keymap {
-    let mut km = Keymap { base: HashMap::new(), layer_l: HashMap::new(), layer_r: HashMap::new(), rear: [b'1', b'2', b'3', b'4'] };
+    let mut km = Keymap {
+        base: HashMap::new(),
+        layer_l: HashMap::new(),
+        layer_r: HashMap::new(),
+        rear: [b'1', b'2', b'3', b'4'],
+        combos: Vec::new(),
+    };
     let mut section = String::new();
     for line in text.lines() {
         let line = line.split(';').next().unwrap_or("").trim();
@@ -115,6 +123,15 @@ fn parse(text: &str) -> Keymap {
                         "capa_l" => km.layer_l.insert(b, vk),
                         _ => km.layer_r.insert(b, vk),
                     };
+                }
+            },
+            "combos" => {
+                let btns: Option<Vec<Btn>> = k.split('+').map(|b| btn_name(b.trim())).collect();
+                let keys: Option<Vec<u8>> = v.split('+').map(vk_name).collect();
+                if let (Some(b), Some(k)) = (btns, keys) {
+                    if b.len() >= 2 && !k.is_empty() {
+                        km.combos.push((b, k));
+                    }
                 }
             },
             "tactil" => {
@@ -146,7 +163,8 @@ pub struct VitaInput {
     r_ctrl: bool,
     shift_release_in: u32,
     stick: [bool; 4],
-    escape: bool,
+    /// combinación activa (índice) y si ya se soltó alguno de sus botones
+    combo: Option<usize>,
     touching: bool,
     rear_held: Option<u8>,
     /// SELECT+TRIÁNGULO pulsado: abrir el teclado del sistema
@@ -181,7 +199,7 @@ impl VitaInput {
             r_ctrl: false,
             shift_release_in: 0,
             stick: [false; 4],
-            escape: false,
+            combo: None,
             touching: false,
             rear_held: None,
             ime_request: false,
@@ -227,12 +245,42 @@ impl VitaInput {
             self.prev_buttons = buttons;
             return out
         }
-        // SELECT+START = ESCAPE
-        let esc = down(SCE_CTRL_SELECT) && down(SCE_CTRL_START);
-        if esc != self.escape {
-            out.push(Out::Key(0x1B, esc));
-            self.escape = esc;
+        // combinaciones de [combos] (SELECT+START = ESC, L+R+TRIÁNGULO = CTRL+P…): se activan al
+        // pulsar el último botón con los demás mantenidos y se sueltan al soltar cualquiera
+        let mask_of = |b: Btn| ALL.iter().find(|(x, _)| *x == b).map_or(0, |(_, m)| *m);
+        if let Some(ci) = self.combo {
+            let (btns, keys) = &self.km.combos[ci];
+            if !btns.iter().all(|&b| down(mask_of(b))) {
+                for &vk in keys.iter().rev() {
+                    out.push(Out::Key(vk, false));
+                }
+                self.combo = None;
+            }
         }
+        if self.combo.is_none() {
+            // las combinaciones más largas primero (L+R+START antes que R+START)
+            let mut order: Vec<usize> = (0..self.km.combos.len()).collect();
+            order.sort_by_key(|&i| std::cmp::Reverse(self.km.combos[i].0.len()));
+            for ci in order {
+                let (btns, keys) = &self.km.combos[ci];
+                if btns.iter().all(|&b| down(mask_of(b))) && btns.iter().any(|&b| pressed & mask_of(b) != 0) {
+                    // soltar lo que esos botones tuvieran pulsado por separado
+                    for &b in btns {
+                        if let Some(vk) = self.held.remove(&b) {
+                            out.push(Out::Key(vk, false));
+                        }
+                    }
+                    for &vk in keys {
+                        out.push(Out::Key(vk, true));
+                    }
+                    self.layer_used_l = true;
+                    self.layer_used_r = true;
+                    self.combo = Some(ci);
+                    break
+                }
+            }
+        }
+        let esc = self.combo.is_some();
 
         for (b, mask) in ALL {
             if b == Btn::L || b == Btn::R {
