@@ -40,4 +40,4 @@ panel trasero = teclas 1-4.
 - Probar en consola: compilación de shaders, imagen, velocidad, memoria.
 - Audio (de momento sin sonido).
 - `show_image`/`show_info` (ventanas informativas).
-- Opción de escalado (ahora: el del juego, centrado).
+- Presentación: escala entera si cabe al menos x2 (320x180 -> x3); si no (combate 576x324), ajustada a 960x540. Registro de rendimiento cada 5 s en runner.log (FPS, ms de lógica y de dibujo, sala).
