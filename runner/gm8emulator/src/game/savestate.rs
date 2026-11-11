@@ -54,7 +54,7 @@ pub struct SaveState {
     pub user_transitions: HashMap<i32, UserTransition>,
 
     pub globals: DummyFieldHolder,
-    pub globalvars: HashSet<usize>,
+    pub globalvars: crate::util::FastHashSet<usize>,
     pub game_start: bool,
 
     pub stacks: HandleList<ds::Stack>,

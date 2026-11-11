@@ -76,9 +76,43 @@ pub fn rewrite_script(scripts: &[Option<Box<Script>>], id: usize, src: gml::Stri
                 _ => src,
             }
         },
+        // Comprobación antitrampas que se recalcula varias veces por fotograma en combate
+        // (≈20 % del tiempo): el bucle de sumas pasa a una función nativa con las mismas
+        // operaciones en el mismo orden (rld_secpk2_sum)
+        b"GetSecurityPK2" | b"SecurityPK2" if secpk2_ok(scripts) => {
+            let text = String::from_utf8_lossy(src.as_ref()).into_owned();
+            let get_loop = SECPK2_LOOP.to_string();
+            let sec_loop = SECPK2_LOOP.replace("v7 +=", "(3).vsietepk2 +=");
+            let new = if script.name.as_ref() == b"GetSecurityPK2" && text.matches(&get_loop).count() == 1 {
+                Some(text.replace(&get_loop, "v7=rld_secpk2_sum(v7); i=6; j=5;"))
+            } else if script.name.as_ref() == b"SecurityPK2" && text.matches(&sec_loop).count() == 1 {
+                Some(text.replace(&sec_loop, "(3).vsietepk2=rld_secpk2_sum((3).vsietepk2); i=6; j=5;"))
+            } else {
+                None
+            };
+            if std::env::var_os("RLD_DEBUG_ACCEL").is_some() {
+                crate::startlog(&format!("DEBUG secpk2 {}: get={} sec={} new={}", String::from_utf8_lossy(script.name.as_ref()),
+                    text.matches(&get_loop).count(), text.matches(&sec_loop).count(), new.as_ref().map_or(0, |n| n.len())));
+            }
+            match new {
+                Some(n) if !n.contains("+=(i*7)+(global.PP_1[i]*6)") => {
+                    crate::startlog(&format!("Acelerador: {} -> rld_secpk2_sum", String::from_utf8_lossy(script.name.as_ref())));
+                    gml::String::from(n.into_bytes())
+                },
+                _ => src,
+            }
+        },
         _ => src,
     }
 }
+
+/// ¿El bucle usa ex(9485, …) = RoundToTwo tal y como lo replica rld_secpk2_sum?
+fn secpk2_ok(scripts: &[Option<Box<Script>>]) -> bool {
+    matches!(scripts.get(9485), Some(Some(s)) if s.name.as_ref() == b"RoundToTwo"
+        && trim(s.source.as_ref()) == b"return round(argument0*100)/100;")
+}
+
+const SECPK2_LOOP: &str = r#"for(i=0;i<=5;i+=1){ v7 +=(i*7)+(global.PP_1[i]*6)+(global.PS_1[i]*7)+global.STD1[i]+361; v7 +=(i*3)+(global.IV[i]*7)+(global.objpoke1[i]*6)+(global.selue_pk1[i]*11)+global.pkmnsex1[i]+361; v7 +=(i*7)+(global.PP_2[i]*6)+(global.PS_2[i]*7)+global.STD2[i]+361; v7 +=(i*3)+(global.IV2[i]*7)+(global.objpoke2[i]*6)+(global.selue_pk2[i]*11)+global.pkmnsex2[i]+361; for(j=1;j<=4;j+=1){ v7 +=global.attack1[i,j]*7*j; v7 +=global.attack2[i,j]*7*j; } v7 +=(i*13)+(((global.actual1+8)*5)+(global.MAX_PP_1[i]*2)+(global.MAX_PS_1[i]*2)+(global.XTRA_PS_1[i]*2)+(global.atk1[i]*3)+(global.def1[i]*3)+(ex(9485,global.vel1[i])*7)); v7 +=(global.atk_sp1[i]*5)+(global.def_sp1[i]*3)+(global.prec1[i]*4)+(global.tipoA1[i]*6)+(global.tipoB1[i]*5)+(global.tipoC1[i]*4); v7 +=(i*13)+(((global.actual2+8)*5)+(global.MAX_PP_2[i]*2)+(global.MAX_PS_2[i]*2)+(global.XTRA_PS_2[i]*2)+(global.atk2[i]*3)+(global.def2[i]*3)+(ex(9485,global.vel2[i])*9)); v7 +=(global.atk_sp2[i]*5)+(global.def_sp2[i]*3)+(global.prec2[i]*4)+(global.tipoA2[i]*6)+(global.tipoB2[i]*5)+(global.tipoC2[i]*4); }"#;
 
 fn trim(b: &[u8]) -> &[u8] {
     let s = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
@@ -391,6 +425,83 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
 }
 
 impl crate::game::Game {
+    /// Autocomprobación de rld_secpk2_sum (RLD_SELFTEST=1): el bucle GML original contra la versión
+    /// nativa, con variables globales aleatorias (enteros, decimales como 1.5 o 2/3 en la velocidad,
+    /// y huecos sin asignar). Restaura las globales al terminar.
+    pub fn accel_selftest_secpk2(&mut self) {
+        use crate::{game::GetAsset, gml::{Context, Value}, instance::{Field, Instance}};
+        let names = [
+            "PP_1", "PS_1", "STD1", "IV", "objpoke1", "selue_pk1", "pkmnsex1", "PP_2", "PS_2", "STD2", "IV2", "objpoke2",
+            "selue_pk2", "pkmnsex2", "attack1", "attack2", "actual1", "actual2", "MAX_PP_1", "MAX_PS_1", "XTRA_PS_1",
+            "atk1", "def1", "vel1", "atk_sp1", "def_sp1", "prec1", "tipoA1", "tipoB1", "tipoC1", "MAX_PP_2", "MAX_PS_2",
+            "XTRA_PS_2", "atk2", "def2", "vel2", "atk_sp2", "def_sp2", "prec2", "tipoA2", "tipoB2", "tipoC2",
+        ];
+        let ids: Vec<usize> = names.iter().map(|n| self.compiler.get_field_id(n.as_bytes())).collect();
+        let backup: Vec<Option<Field>> = ids.iter().map(|id| self.globals.fields.remove(id)).collect();
+        let src = format!("var i, v7; v7=argument0; {} return v7;", SECPK2_LOOP.replace("global.", "global."));
+        let Ok(orig) = self.compiler.compile(src.as_bytes()) else {
+            crate::startlog("SELFTEST rld_secpk2_sum: no compila");
+            return
+        };
+        let mut seed: u64 = 0x9E3779B97F4A7C15;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut cases, mut bad) = (0, 0);
+        for trial in 0..200 {
+            for (k, id) in ids.iter().enumerate() {
+                self.globals.fields.remove(id);
+                for i in 0..6u32 {
+                    for j in 0..5u32 {
+                        let idx = if names[k].starts_with("attack") { i * 32000 + j } else if j == 0 { i } else { continue };
+                        // a veces sin asignar
+                        if trial % 7 == 3 && rnd() % 5 == 0 {
+                            continue
+                        }
+                        let v = match rnd() % 6 {
+                            0 => (rnd() % 1000) as f64 + 0.5,
+                            1 => (rnd() % 300) as f64 * 2.0 / 3.0,
+                            2 => -((rnd() % 50) as f64),
+                            _ => (rnd() % 800) as f64,
+                        };
+                        match self.globals.fields.get_mut(id) {
+                            Some(f) => f.set(idx, Value::Real(v.into())),
+                            None => {
+                                self.globals.fields.insert(*id, Field::new(idx, Value::Real(v.into())));
+                            },
+                        }
+                    }
+                }
+            }
+            let start = Value::Real((((rnd() % 100000) as f64) + if trial % 2 == 0 { 0.25 } else { 0.0 }).into());
+            let dummy = self.room.instance_list.insert_dummy(Instance::new_dummy(self.assets.objects.get_asset(0).map(|x| x.as_ref())));
+            let mut ctx = Context::with_single_instance(dummy);
+            ctx.arguments[0] = start.clone();
+            ctx.argument_count = 1;
+            let r1 = self.execute(&orig, &mut ctx).map(|_| ctx.return_value.clone()).map_err(|e| e.to_string());
+            self.room.instance_list.remove_dummy(dummy);
+            let r2 = self.rld_secpk2_sum(&[start]).map_err(|e| e.to_string());
+            let (a, b) = (format!("{:?}", r1), format!("{:?}", r2));
+            cases += 1;
+            if a != b {
+                bad += 1;
+                if bad <= 3 {
+                    crate::startlog(&format!("SELFTEST rld_secpk2_sum: {} != {}", a, b));
+                }
+            }
+        }
+        for (id, f) in ids.iter().zip(backup) {
+            self.globals.fields.remove(id);
+            if let Some(f) = f {
+                self.globals.fields.insert(*id, f);
+            }
+        }
+        crate::startlog(&format!("SELFTEST rld_secpk2_sum: {} casos, {} diferencias", cases, bad));
+    }
+
     /// Autocomprobación de rld_in_view (RLD_SELFTEST=1): original GML contra la versión nativa con
     /// varias vistas y puntos dentro, fuera y justo en el borde (incluidos decimales y cadenas).
     pub fn accel_selftest_inview(&mut self) {
@@ -579,6 +690,27 @@ impl crate::game::Game {
         let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|e| format!("ERROR {e}"));
         log(&format!("Diagnóstico: carpeta actual (working_directory) = '{}'", cwd));
         log(&format!("Diagnóstico: program_directory = '{}'", String::from_utf8_lossy(self.program_directory.as_ref())));
+        if std::env::var_os("RLD_DUMP_VIEWS").is_some() {
+            for (i, r) in self.assets.rooms.iter().enumerate() {
+                let Some(r) = r else { continue };
+                if !r.views_enabled {
+                    continue
+                }
+                for v in r.views.iter().filter(|v| v.visible) {
+                    if v.source_w as i64 != v.port_w as i64 || v.source_h as i64 != v.port_h as i64 {
+                        log(&format!(
+                            "VISTA {} {}: {}x{} -> {}x{}",
+                            i,
+                            self.decode_str(r.name.as_ref()),
+                            v.source_w,
+                            v.source_h,
+                            v.port_w,
+                            v.port_h
+                        ));
+                    }
+                }
+            }
+        }
         log(&format!("Diagnóstico: zona horaria = UTC{:+} min (día/noche del juego)", crate::gml::datetime::local_offset_secs() / 60));
         log(&format!("Diagnóstico: temp_directory = '{}'", String::from_utf8_lossy(self.temp_directory.as_ref())));
         // como ImportBattlePokemon: working_directory + "\data\pkmnbattle\P1_2.gmspr"
@@ -705,5 +837,79 @@ mod tests {
         if let Some(o) = out {
             assert!(o.starts_with("if(b) if(argument0=0)return(0);"), "{o}");
         }
+    }
+}
+
+
+impl crate::game::Game {
+    /// Bucle de GetSecurityPK2/SecurityPK2: acumula sobre `argument0`, término a término y con las
+    /// mismas operaciones de Value (mismos redondeos y errores) que el GML original.
+    pub fn rld_secpk2_sum(&mut self, args: &[gml::Value]) -> gml::Result<gml::Value> {
+        use gml::Value;
+        use crate::game::Game;
+        let mut acc = args.first().cloned().unwrap_or_default();
+        let r = |x: f64| Value::Real(x.into());
+        // valor de una variable global (índice: i, o i*32000+j)
+        macro_rules! g {
+            ($name:expr, $idx:expr) => {{
+                let idx: u32 = $idx;
+                let id = self.compiler.find_field_id($name.as_bytes());
+                match id.and_then(|id| self.globals.fields.get(&id)).and_then(|f| f.get(idx)) {
+                    Some(v) => v,
+                    None if self.uninit_fields_are_zero => Value::default(),
+                    None => return Err(gml::Error::UninitializedVariable($name.into(), idx)),
+                }
+            }};
+        }
+        // RoundToTwo(x) = round(x*100)/100
+        macro_rules! rt2 {
+            ($v:expr) => {{
+                let m = $v.mul(r(100.0))?;
+                let rounded = Game::round(&[m])?;
+                rounded.div(r(100.0))?
+            }};
+        }
+        for i in 0..=5u32 {
+            let fi = r(i as f64);
+            // v +=(i*7)+(PP_1[i]*6)+(PS_1[i]*7)+STD1[i]+361
+            let t = fi.clone().mul(r(7.0))?.add(g!("PP_1", i).mul(r(6.0))?)?.add(g!("PS_1", i).mul(r(7.0))?)?.add(g!("STD1", i))?.add(r(361.0))?;
+            acc = acc.add(t)?;
+            // v +=(i*3)+(IV[i]*7)+(objpoke1[i]*6)+(selue_pk1[i]*11)+pkmnsex1[i]+361
+            let t = fi.clone().mul(r(3.0))?.add(g!("IV", i).mul(r(7.0))?)?.add(g!("objpoke1", i).mul(r(6.0))?)?
+                .add(g!("selue_pk1", i).mul(r(11.0))?)?.add(g!("pkmnsex1", i))?.add(r(361.0))?;
+            acc = acc.add(t)?;
+            let t = fi.clone().mul(r(7.0))?.add(g!("PP_2", i).mul(r(6.0))?)?.add(g!("PS_2", i).mul(r(7.0))?)?.add(g!("STD2", i))?.add(r(361.0))?;
+            acc = acc.add(t)?;
+            let t = fi.clone().mul(r(3.0))?.add(g!("IV2", i).mul(r(7.0))?)?.add(g!("objpoke2", i).mul(r(6.0))?)?
+                .add(g!("selue_pk2", i).mul(r(11.0))?)?.add(g!("pkmnsex2", i))?.add(r(361.0))?;
+            acc = acc.add(t)?;
+            // for(j=1;j<=4;j+=1){ v +=attack1[i,j]*7*j; v +=attack2[i,j]*7*j; }
+            for j in 1..=4u32 {
+                let fj = r(j as f64);
+                acc = acc.add(g!("attack1", i * 32000 + j).mul(r(7.0))?.mul(fj.clone())?)?;
+                acc = acc.add(g!("attack2", i * 32000 + j).mul(r(7.0))?.mul(fj)?)?;
+            }
+            for (side, velmul) in [("1", 7.0), ("2", 9.0)] {
+                let n = |base: &str| format!("{}{}", base, side);
+                // v +=(i*13)+(((actual+8)*5)+(MAX_PP[i]*2)+(MAX_PS[i]*2)+(XTRA_PS[i]*2)+(atk[i]*3)+(def[i]*3)+(RoundToTwo(vel[i])*k))
+                let inner = g!(n("actual"), 0).add(r(8.0))?.mul(r(5.0))?
+                    .add(g!(format!("MAX_PP_{}", side), i).mul(r(2.0))?)?
+                    .add(g!(format!("MAX_PS_{}", side), i).mul(r(2.0))?)?
+                    .add(g!(format!("XTRA_PS_{}", side), i).mul(r(2.0))?)?
+                    .add(g!(n("atk"), i).mul(r(3.0))?)?
+                    .add(g!(n("def"), i).mul(r(3.0))?)?
+                    .add(rt2!(g!(n("vel"), i)).mul(r(velmul))?)?;
+                acc = acc.add(fi.clone().mul(r(13.0))?.add(inner)?)?;
+                // v +=(atk_sp[i]*5)+(def_sp[i]*3)+(prec[i]*4)+(tipoA[i]*6)+(tipoB[i]*5)+(tipoC[i]*4)
+                let t = g!(n("atk_sp"), i).mul(r(5.0))?
+                    .add(g!(n("def_sp"), i).mul(r(3.0))?)?
+                    .add(g!(n("prec"), i).mul(r(4.0))?)?
+                    .add(g!(n("tipoA"), i).mul(r(6.0))?)?
+                    .add(g!(n("tipoB"), i).mul(r(5.0))?)?
+                    .add(g!(n("tipoC"), i).mul(r(4.0))?)?;
+                acc = acc.add(t)?;
+            }
+        }
+        Ok(acc)
     }
 }

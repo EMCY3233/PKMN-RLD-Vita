@@ -88,3 +88,4 @@ impl std::hash::Hasher for FastHasher {
 
 pub type FastHashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FastHasher>>;
 pub type FastIndexMap<K, V> = indexmap::IndexMap<K, V, std::hash::BuildHasherDefault<FastHasher>>;
+pub type FastHashSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<FastHasher>>;

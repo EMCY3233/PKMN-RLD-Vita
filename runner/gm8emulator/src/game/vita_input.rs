@@ -82,6 +82,9 @@ fn vk_name(n: &str) -> Option<u8> {
         "HOME" => 0x24,
         "END" => 0x23,
         "BACKSLASH" => 220,
+        // acciones del runner (no son teclas)
+        "GUIA" => ACT_GUIDE,
+        "BARRA" => ACT_BAR,
         s if s.len() == 1 && s.as_bytes()[0].is_ascii_alphanumeric() => s.as_bytes()[0],
         s if s.starts_with('F') && s[1..].parse::<u8>().map_or(false, |f| (1..=12).contains(&f)) => {
             0x6F + s[1..].parse::<u8>().unwrap()
@@ -90,7 +93,13 @@ fn vk_name(n: &str) -> Option<u8> {
     })
 }
 
+/// Códigos internos para acciones del runner en [combos]
+const ACT_GUIDE: u8 = 0xF0;
+const ACT_BAR: u8 = 0xF1;
+
 struct Keymap {
+    /// para la guía en pantalla: (sección, botones, teclas, descripción del comentario)
+    guide: Vec<(String, String, String, String)>,
     base: HashMap<Btn, u8>,
     layer_l: HashMap<Btn, u8>,
     layer_r: HashMap<Btn, u8>,
@@ -104,6 +113,7 @@ struct Keymap {
 
 fn parse(text: &str) -> Keymap {
     let mut km = Keymap {
+        guide: Vec::new(),
         base: HashMap::new(),
         layer_l: HashMap::new(),
         layer_r: HashMap::new(),
@@ -114,13 +124,17 @@ fn parse(text: &str) -> Keymap {
         combos: Vec::new(),
     };
     let mut section = String::new();
-    for line in text.lines() {
-        let line = line.split(';').next().unwrap_or("").trim();
+    for raw in text.lines() {
+        let line = raw.split(';').next().unwrap_or("").trim();
         if line.starts_with('[') {
             section = line.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
             continue
         }
         let Some((k, v)) = line.split_once('=') else { continue };
+        let comment = raw.split_once(';').map(|(_, c)| c.trim().to_string()).unwrap_or_default();
+        if !matches!(section.as_str(), "pantalla") && !k.trim().eq_ignore_ascii_case("LSTICK") {
+            km.guide.push((section.clone(), k.trim().to_string(), v.trim().to_string(), comment));
+        }
         let (k, v) = (k.trim().to_ascii_uppercase(), v.trim());
         match section.as_str() {
             "base" | "capa_l" | "capa_r" | "capa_select" => {
@@ -184,6 +198,10 @@ pub struct VitaInput {
     rear_held: Option<u8>,
     /// SELECT+TRIÁNGULO pulsado: abrir el teclado del sistema
     pub ime_request: bool,
+    /// L+R+○ (por defecto): abrir la guía de controles
+    pub guide_request: bool,
+    /// repetición de la cruceta en páginas
+    page_repeat: u32,
     pub ime: Option<Ime>,
     /// tecla ficticia que hay que soltar en el siguiente sondeo (tras cerrar el teclado)
     pub ime_release: Option<u8>,
@@ -223,6 +241,8 @@ impl VitaInput {
             overlay_key: None,
             rear_held: None,
             ime_request: false,
+            guide_request: false,
+            page_repeat: 0,
             ime: None,
             ime_release: None,
             ime_script: None,
@@ -255,12 +275,48 @@ impl VitaInput {
         let released = !buttons & self.prev_buttons;
         let down = |m: u32| buttons & m != 0;
 
+        // página del runner abierta (manual, imagen, guía): los botones la manejan a ella
+        if crate::render::OVERLAY_PAGE.lock().map_or(false, |p| p.is_some()) {
+            use crate::game::pages::{page_close, page_scroll};
+            let lines = crate::render::PAGE_LINES as i32;
+            if pressed & (SCE_CTRL_CIRCLE | SCE_CTRL_CROSS | SCE_CTRL_START) != 0 {
+                page_close();
+            }
+            let held_ud = buttons & (SCE_CTRL_UP | SCE_CTRL_DOWN);
+            if held_ud != 0 {
+                self.page_repeat += 1;
+            } else {
+                self.page_repeat = 0;
+            }
+            let rep = self.page_repeat == 1 || (self.page_repeat > 12 && self.page_repeat % 3 == 0);
+            if rep && buttons & SCE_CTRL_DOWN != 0 {
+                page_scroll(1);
+            }
+            if rep && buttons & SCE_CTRL_UP != 0 {
+                page_scroll(-1);
+            }
+            if pressed & (SCE_CTRL_RTRIGGER | SCE_CTRL_RIGHT) != 0 {
+                page_scroll(lines);
+            }
+            if pressed & (SCE_CTRL_LTRIGGER | SCE_CTRL_LEFT) != 0 {
+                page_scroll(-lines);
+            }
+            // soltar todo lo que estuviera pulsado para el juego
+            for (_, vk) in self.held.drain() {
+                out.push(Out::Key(vk, false));
+            }
+            self.prev_buttons = buttons;
+            self.layer_used_l = true;
+            self.layer_used_r = true;
+            self.layer_used_select = true;
+            return out
+        }
         // con el teclado del sistema abierto, los botones son suyos
         if self.ime.is_some() {
             self.prev_buttons = buttons;
             return out
         }
-        // L+R+SELECT = mostrar/ocultar la barra de teclas en pantalla (1-9, 0, \, L)
+        // L+R+SELECT = mostrar/ocultar la barra (también configurable en [combos] como BARRA)
         if down(SCE_CTRL_LTRIGGER) && down(SCE_CTRL_RTRIGGER) && pressed & SCE_CTRL_SELECT != 0 {
             use std::sync::atomic::Ordering::Relaxed;
             let v = !crate::render::OVERLAY_VISIBLE.load(Relaxed);
@@ -284,7 +340,9 @@ impl VitaInput {
             let (btns, keys) = &self.km.combos[ci];
             if !btns.iter().all(|&b| down(mask_of(b))) {
                 for &vk in keys.iter().rev() {
-                    out.push(Out::Key(vk, false));
+                    if vk != ACT_GUIDE && vk != ACT_BAR {
+                        out.push(Out::Key(vk, false));
+                    }
                 }
                 self.combo = None;
             }
@@ -303,7 +361,15 @@ impl VitaInput {
                         }
                     }
                     for &vk in keys {
-                        out.push(Out::Key(vk, true));
+                        match vk {
+                            ACT_GUIDE => self.guide_request = true,
+                            ACT_BAR => {
+                                use std::sync::atomic::Ordering::Relaxed;
+                                let v = !crate::render::OVERLAY_VISIBLE.load(Relaxed);
+                                crate::render::OVERLAY_VISIBLE.store(v, Relaxed);
+                            },
+                            _ => out.push(Out::Key(vk, true)),
+                        }
                     }
                     self.layer_used_l = true;
                     self.layer_used_r = true;
@@ -539,5 +605,72 @@ impl Ime {
                 Some(None)
             }
         }
+    }
+}
+
+
+/// Nombre de botón para la guía
+fn btn_label(b: &str) -> String {
+    b.split('+')
+        .map(|p| match p.trim().to_ascii_uppercase().as_str() {
+            "CROSS" => "Cruz",
+            "CIRCLE" => "Círculo",
+            "SQUARE" => "Cuadrado",
+            "TRIANGLE" => "Triángulo",
+            "DPAD_UP" => "Arriba",
+            "DPAD_DOWN" => "Abajo",
+            "DPAD_LEFT" => "Izquierda",
+            "DPAD_RIGHT" => "Derecha",
+            "START" => "START",
+            "SELECT" => "SELECT",
+            "L" => "L",
+            "R" => "R",
+            "FRONT_TOUCH" => "Pantalla táctil",
+            "TECLADO_VIRTUAL" => "Teclado del sistema",
+            other => if other.starts_with("REAR_") { "Panel trasero" } else { "?" },
+        }
+        .to_string())
+        .collect::<Vec<_>>()
+        .join(" + ")
+}
+
+impl VitaInput {
+    /// Líneas de la guía de controles, a partir del keymap en uso
+    pub fn guide_lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut last = String::new();
+        for (sec, btn, keys, desc) in &self.km.guide {
+            if btn.to_ascii_uppercase().starts_with("REAR_") {
+                continue
+            }
+            if *sec != last {
+                if !out.is_empty() {
+                    out.push(String::new());
+                }
+                out.push(match sec.as_str() {
+                    "base" => "BOTONES".to_string(),
+                    "capa_l" => "MANTENIENDO L".to_string(),
+                    "capa_r" => "MANTENIENDO R".to_string(),
+                    "capa_select" => "MANTENIENDO SELECT".to_string(),
+                    "combos" => "COMBINACIONES (pulsar a la vez)".to_string(),
+                    "tactil" => "PANTALLA TÁCTIL".to_string(),
+                    other => other.to_uppercase(),
+                });
+                last = sec.clone();
+            }
+            let keys_txt = match keys.to_ascii_uppercase().as_str() {
+                "GUIA" => "guía de controles".to_string(),
+                "BARRA" => "barra de números".to_string(),
+                "MOUSE" => "ratón".to_string(),
+                _ => format!("tecla {}", keys),
+            };
+            let label = btn_label(btn);
+            let line = format!("  {:<28} {:<20} {}", label, keys_txt, desc);
+            out.push(line.chars().take(92).collect());
+        }
+        out.push(String::new());
+        out.push("BARRA DE NÚMEROS (L+R+Cuadrado o L+R+SELECT): 1-6 a la izquierda, 7 8 9 0 \\ L a la derecha".into());
+        out.push("Para cambiar los botones: editar ux0:data/reloaded/keymap.ini (se lee al arrancar)".into());
+        out
     }
 }

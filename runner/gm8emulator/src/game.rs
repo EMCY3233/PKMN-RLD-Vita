@@ -19,6 +19,7 @@ pub mod savestate;
 pub mod surface;
 pub mod transition;
 pub mod view;
+pub mod pages;
 #[cfg(all(target_os = "vita", feature = "vitagl"))]
 pub mod vita_input;
 
@@ -123,6 +124,10 @@ mod game_epoch_serde {
 }
 
 /// Structure which contains all the components of a game.
+thread_local! {
+    static PERF_DRAW_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
 pub struct Game {
     pub compiler: Compiler,
     pub text_files: HandleArray<file::TextHandle, 32>,
@@ -157,7 +162,7 @@ pub struct Game {
 
     pub constants: Vec<gml::Value>,
     pub globals: DummyFieldHolder,
-    pub globalvars: HashSet<usize>,
+    pub globalvars: crate::util::FastHashSet<usize>,
     pub game_start: bool,
 
     pub stacks: HandleList<ds::Stack>,
@@ -431,6 +436,9 @@ impl Game {
         let _ = room1;
 
         let mut rand = Random::new();
+        if let Some(seed) = std::env::var("RLD_SEED").ok().and_then(|v| v.parse::<i32>().ok()) {
+            rand.set_seed(seed);
+        }
 
         // manual decode to avoid errors
         let decode_str_maybe = |bytes: Vec<u8>| match gm_version {
@@ -1351,7 +1359,7 @@ impl Game {
             user_transitions: HashMap::new(),
             constants: Vec::with_capacity(constants.len()),
             globals: DummyFieldHolder::new(),
-            globalvars: HashSet::new(),
+            globalvars: Default::default(),
             game_start: true,
             stacks: HandleList::new(),
             queues: HandleList::new(),
@@ -2109,7 +2117,9 @@ impl Game {
 
         // Draw everything, including running draw events
         if self.auto_draw {
+            let t = Instant::now();
             self.draw()?;
+            PERF_DRAW_NS.with(|c| c.set(c.get() + t.elapsed().as_nanos() as u64));
         }
 
         // Move backgrounds
@@ -2206,6 +2216,19 @@ impl Game {
                         }
                     }
                 }
+            }
+            // guía de controles (modal: el juego espera, como con el manual)
+            if vi.guide_request {
+                vi.guide_request = false;
+                let lines = vi.guide_lines();
+                self.vita_input = Some(vi);
+                let _ = self.run_page_modal(crate::render::OverlayPage {
+                    title: "Guía de controles (PS Vita)".into(),
+                    lines,
+                    footer: "Arriba/Abajo: desplazar   L/R: pagina   Circulo: cerrar".into(),
+                    ..Default::default()
+                });
+                return
             }
             // Con el teclado abierto el juego suele estar en un bucle que solo lee teclas (sin dibujar):
             // se vuelve a presentar el último fotograma para que vitaGL dibuje y actualice el diálogo
@@ -2365,10 +2388,37 @@ impl Game {
         let mut time_now = Instant::now();
         let mut time_last = time_now;
         let mut current_frame_time: u32 = 0;
+        // registro de rendimiento cada 5 s (siempre en la Vita; en PC con RLD_PERF)
+        let perf_on = cfg!(target_os = "vita") || std::env::var_os("RLD_PERF").is_some();
+        let (mut perf_t0, mut perf_frames, mut perf_busy) = (Instant::now(), 0u32, 0u64);
         loop {
             self.process_window_events();
 
+            let t_frame = Instant::now();
             self.frame()?;
+            if perf_on {
+                perf_busy += t_frame.elapsed().as_nanos() as u64;
+                perf_frames += 1;
+                let el = perf_t0.elapsed();
+                if el >= Duration::from_secs(5) {
+                    let draw = PERF_DRAW_NS.with(|c| c.replace(0));
+                    let f = perf_frames.max(1) as f64;
+                    let room = self.assets.rooms.get_asset(self.room.id).map(|r| r.name.decode_utf8().into_owned()).unwrap_or_default();
+                    crate::startlog(&format!(
+                        "rendimiento: {:.1} FPS (objetivo {}) | por fotograma {:.1} ms lógica, {:.1} ms dibujo | sala {} '{}' | {} instancias",
+                        f / el.as_secs_f64(),
+                        self.room.speed,
+                        (perf_busy.saturating_sub(draw)) as f64 / f / 1e6,
+                        draw as f64 / f / 1e6,
+                        self.room.id,
+                        room,
+                        self.room.instance_list.count_all(),
+                    ));
+                    perf_t0 = Instant::now();
+                    perf_frames = 0;
+                    perf_busy = 0;
+                }
+            }
             if self.bench_tick() {
                 break Ok(());
             }

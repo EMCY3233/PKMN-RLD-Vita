@@ -394,6 +394,7 @@ fn xmain() -> i32 {
     if env::var_os("RLD_SELFTEST").is_some() {
         components.accel_selftest_tables();
         components.accel_selftest_inview();
+        components.accel_selftest_secpk2();
     }
 
     if let Some(n) = bench_frames {

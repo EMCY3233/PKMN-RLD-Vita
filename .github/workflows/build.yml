@@ -144,8 +144,14 @@ jobs:
         working-directory: runner/target/armv7-sony-vita-newlibeabihf/release
         shell: bash
         run: |
-          vita-mksfoex -s TITLE_ID=PKRLD0010 -d ATTRIBUTE2=12 "Pokemon Reloaded (prueba)" gl.sfo
-          vita-pack-vpk -s gl.sfo -b gm8emulator.self ReloadedGL.vpk
+          vita-mksfoex -s TITLE_ID=PKRLD0010 -d ATTRIBUTE2=12 "Pokemon Reloaded" gl.sfo
+          LA="$GITHUB_WORKSPACE/vita/livearea"
+          vita-pack-vpk -s gl.sfo -b gm8emulator.self \
+            -a "$LA/icon0.png=sce_sys/icon0.png" \
+            -a "$LA/bg.png=sce_sys/livearea/contents/bg.png" \
+            -a "$LA/startup.png=sce_sys/livearea/contents/startup.png" \
+            -a "$LA/template.xml=sce_sys/livearea/contents/template.xml" \
+            ReloadedGL.vpk
           rm -f gm8emulator.vpk
       - uses: actions/upload-artifact@v4
         with:

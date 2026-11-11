@@ -229,6 +229,16 @@ impl Game {
             b.rooms_seen.push(self.room.id);
             let name = self.assets.rooms.get_asset(self.room.id).map(|r| self.decode_str(r.name.as_ref()).into_owned()).unwrap_or_default();
             b.line(&format!("-> entra en sala {} '{}' (fotograma {}, velocidad de sala {})", self.room.id, name, b.frame, self.room.speed));
+            if self.room.views_enabled {
+                let vs: Vec<String> = self
+                    .room
+                    .views
+                    .iter()
+                    .filter(|v| v.visible)
+                    .map(|v| format!("vista {}x{} -> puerto {}x{}", v.source_w, v.source_h, v.port_w, v.port_h))
+                    .collect();
+                b.line(&format!("   {}", vs.join(", ")));
+            }
         }
         if let Some(target) = b.goto {
             if self.room.id == 10 {

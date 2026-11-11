@@ -21,7 +21,7 @@ pub struct GMSave {
     cursor_sprite: i32,
     cursor_sprite_frame: u32,
     auto_draw: bool,
-    globalvars: HashSet<usize>,
+    globalvars: crate::util::FastHashSet<usize>,
     globals: DummyFieldHolder,
     // TODO persistent stuff
     room: GMRoomSave,

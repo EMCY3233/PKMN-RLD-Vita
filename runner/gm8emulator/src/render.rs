@@ -9,20 +9,47 @@ pub const UNTEXTURED: f32 = -100000.0;
 /// Barra de teclas en pantalla (PS Vita): visible, y botón pulsado (-1 = ninguno)
 pub static OVERLAY_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static OVERLAY_PRESSED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
-/// Teclas de la barra, de izquierda a derecha (código de tecla virtual de Windows)
+/// Teclas de la barra: columna izquierda 1-6, columna derecha 7 8 9 0 \ L (código virtual de Windows)
 pub const OVERLAY_KEYS: [u8; 12] = [b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', 220, b'L'];
-/// Geometría de la barra en la pantalla de 960×544: (x0, y0, ancho, alto, separación)
-pub const OVERLAY_GEOM: (i32, i32, i32, i32, i32) = (98, 4, 60, 40, 4); // arriba: los diálogos y menús de combate van abajo
+pub const OVERLAY_LABELS: [&str; 12] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "\\", "L"];
+
+/// Rectángulo (x, y, ancho, alto) del botón `i` de la barra en la pantalla de 960×544: dos
+/// columnas en los laterales, donde caen los pulgares
+pub fn overlay_button(i: usize) -> (i32, i32, i32, i32) {
+    const W: i32 = 54;
+    const H: i32 = 54;
+    const GAP: i32 = 6;
+    let y0 = (544 - (6 * H + 5 * GAP)) / 2;
+    let x = if i < 6 { 4 } else { 960 - 4 - W };
+    (x, y0 + (i % 6) as i32 * (H + GAP), W, H)
+}
 
 /// Botón de la barra bajo un punto de la pantalla (960×544)
 pub fn overlay_hit(x: i32, y: i32) -> Option<usize> {
-    let (x0, y0, w, h, gap) = OVERLAY_GEOM;
-    if y < y0 || y >= y0 + h || x < x0 {
-        return None
-    }
-    let i = ((x - x0) / (w + gap)) as usize;
-    if i < OVERLAY_KEYS.len() && (x - x0) % (w + gap) < w { Some(i) } else { None }
+    (0..OVERLAY_KEYS.len()).find(|&i| {
+        let (bx, by, w, h) = overlay_button(i);
+        x >= bx && x < bx + w && y >= by && y < by + h
+    })
 }
+
+/// Página a pantalla completa que dibuja el propio runner encima del juego (guía de controles,
+/// información del juego, imágenes de show_image)
+#[derive(Clone, Default)]
+pub struct OverlayPage {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub footer: String,
+    pub image: Option<AtlasRef>,
+    /// primera línea visible
+    pub scroll: usize,
+    /// línea resaltada (para menús)
+    pub selected: Option<usize>,
+}
+
+pub static OVERLAY_PAGE: std::sync::Mutex<Option<OverlayPage>> = std::sync::Mutex::new(None);
+
+/// Líneas de texto que caben en una página
+pub const PAGE_LINES: usize = 21;
 
 pub static PRESENT_RECT: std::sync::Mutex<[i32; 6]> = std::sync::Mutex::new([0, 0, 0, 0, 0, 0]);
 

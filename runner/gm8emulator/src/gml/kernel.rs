@@ -3868,6 +3868,11 @@ impl Game {
     pub fn randomize(&mut self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
         match self.play_type {
+            // RLD_SEED=n (pruebas en PC): semilla fija para repetir exactamente la misma partida
+            PlayType::Normal if std::env::var_os("RLD_SEED").is_some() => {
+                let seed = std::env::var("RLD_SEED").ok().and_then(|v| v.parse::<i32>().ok()).unwrap_or(1);
+                self.rand.set_seed(seed);
+            },
             PlayType::Normal => self.rand.randomize(),
             PlayType::Record => {
                 self.rand.randomize();
@@ -6905,7 +6910,11 @@ impl Game {
     }
 
     pub fn show_image(&mut self, args: &[Value]) -> gml::Result<Value> {
-        let _ = args;
+        // show_image(fname, full, delay): el runner la muestra a pantalla completa hasta pulsar un botón
+        if let Some(Value::Str(f)) = args.first() {
+            let f = self.decode_str(f.as_ref()).into_owned();
+            self.rld_show_image(&f)?;
+        }
         Ok(Default::default())
     }
 
@@ -6936,11 +6945,15 @@ impl Game {
 
     pub fn show_info(&mut self, args: &[Value]) -> gml::Result<Value> {
         let _ = args;
+        self.rld_show_info()?;
         Ok(Default::default())
     }
 
     pub fn load_info(&mut self, args: &[Value]) -> gml::Result<Value> {
-        let _ = args;
+        if let Some(Value::Str(f)) = args.first() {
+            let f = self.decode_str(f.as_ref()).into_owned();
+            self.rld_load_info(&f);
+        }
         Ok(Default::default())
     }
 

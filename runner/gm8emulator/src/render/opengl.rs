@@ -206,6 +206,7 @@ pub struct RendererImpl {
     lazy: LazyTextures,
     /// textura de la barra de teclas en pantalla (cifras 5×7 + bloque blanco), creada al usarla
     overlay_tex: GLuint,
+    overlay_tex_size: (i32, i32),
     loc_gm81_normalize: GLint, // uniform bool gm81_normalize
     loc_tex: GLint,            // uniform sampler2D tex
     buf_state: GLuint,         // uniform RenderState state
@@ -726,6 +727,7 @@ impl RendererImpl {
 
                 simple: simple_uniforms,
                 overlay_tex: 0,
+                overlay_tex_size: (1, 1),
                 lazy: LazyTextures {
                     budget_bytes: std::env::var("RLD_TEX_BUDGET_MB")
                         .ok()
@@ -940,69 +942,43 @@ impl RendererImpl {
         }
     }
 
-    /// Dibuja la barra de teclas en pantalla (1-9, 0, \, L) sobre la imagen del juego
-    unsafe fn draw_overlay(&mut self, u: SimpleUniforms, win_w: i32, win_h: i32) {
-        // cifras 5×7 (filas de arriba abajo, bit 4 = columna izquierda)
-        const GLYPHS: [[u8; 7]; 12] = [
-            [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E], // 1
-            [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F], // 2
-            [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E], // 3
-            [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02], // 4
-            [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E], // 5
-            [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E], // 6
-            [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08], // 7
-            [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E], // 8
-            [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C], // 9
-            [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E], // 0
-            [0x10, 0x10, 0x08, 0x04, 0x02, 0x01, 0x01], // \
-            [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F], // L
-        ];
-        const TW: i32 = 128;
-        const TH: i32 = 8;
+    /// Textura de la fuente del runner (vita/font.png: celdas de 10×20, Latin-1 32..255; la 127 es
+    /// un bloque blanco para fondos)
+    unsafe fn overlay_font(&mut self) -> (i32, i32) {
+        const PNG: &[u8] = include_bytes!("../../../../vita/font.png");
         if self.overlay_tex == 0 {
-            // 13 celdas de 8×8: 12 cifras y un bloque blanco (fondos)
-            let mut px = vec![0u8; (TW * TH * 4) as usize];
-            for (g, rows) in GLYPHS.iter().enumerate() {
-                for (y, row) in rows.iter().enumerate() {
-                    for x in 0..5 {
-                        if row & (0x10 >> x) != 0 {
-                            let i = ((y as i32 * TW + g as i32 * 8 + x) * 4) as usize;
-                            px[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
-                        }
-                    }
-                }
-            }
-            for y in 0..8 {
-                for x in 0..8 {
-                    let i = ((y * TW + 12 * 8 + x) * 4) as usize;
-                    px[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
-                }
-            }
+            let img = image::load_from_memory(PNG).map(|i| i.to_rgba8()).unwrap_or_else(|_| image::RgbaImage::new(1, 1));
+            let (w, h) = (img.width() as i32, img.height() as i32);
             self.gl.GenTextures(1, &mut self.overlay_tex);
             self.gl.BindTexture(gl::TEXTURE_2D, self.overlay_tex);
             self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as _);
             self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as _);
-            self.gl.TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA as _, TW, TH, 0, gl::RGBA, gl::UNSIGNED_BYTE, px.as_ptr().cast());
+            self.gl.TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA as _, w, h, 0, gl::RGBA, gl::UNSIGNED_BYTE, img.as_ptr().cast());
+            self.overlay_tex_size = (w, h);
         }
-        self.gl.BindTexture(gl::TEXTURE_2D, self.overlay_tex);
-        self.gl.Uniform2f(u.tex_size, TW as f32, TH as f32);
-        self.gl.Uniform1f(u.colour_blending, 1.0);
-        self.gl.Enable(gl::BLEND);
-        self.gl.BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+        self.overlay_tex_size
+    }
+
+    /// Dibuja lo que el runner pone encima del juego: página a pantalla completa o barra de teclas
+    unsafe fn draw_overlay(&mut self, u: SimpleUniforms, win_w: i32, win_h: i32) {
+        let page = crate::render::OVERLAY_PAGE.lock().ok().and_then(|p| p.clone());
+        let bar = crate::render::OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
+        if page.is_none() && !bar {
+            return
+        }
+        let (tw, th) = self.overlay_font();
         let (ww, wh) = (win_w as f32, win_h as f32);
-        let to_clip = |x: i32, y: i32| (x as f32 / ww * 2.0 - 1.0, 1.0 - y as f32 / wh * 2.0);
-        let mut verts: Vec<Vertex> = Vec::with_capacity(12 * 12);
-        let mut rect = |x: i32, y: i32, w: i32, h: i32, cell: i32, cw: f32, ch: f32, col: [f32; 4]| {
+        let to_clip = move |x: i32, y: i32| (x as f32 / ww * 2.0 - 1.0, 1.0 - y as f32 / wh * 2.0);
+        let quad = move |verts: &mut Vec<Vertex>, x: i32, y: i32, w: i32, h: i32, atlas: [f32; 4], col: [f32; 4]| {
             let (x1, y1) = to_clip(x, y);
             let (x2, y2) = to_clip(x + w, y + h);
             let v = |px: f32, py: f32, tx: f32, ty: f32| Vertex {
                 pos: [px, py, 0.0],
                 tex_coord: [tx, ty],
                 blend: col,
-                atlas_xywh: [(cell * 8) as f32, 0.0, cw, ch],
+                atlas_xywh: atlas,
                 normal: [0.0; 3],
             };
-            // la fila 0 de la textura va arriba
             verts.extend_from_slice(&[
                 v(x1, y1, 0.0, 0.0),
                 v(x2, y1, 1.0, 0.0),
@@ -1012,26 +988,101 @@ impl RendererImpl {
                 v(x1, y2, 0.0, 1.0),
             ]);
         };
-        let (x0, y0, bw, bh, gap) = crate::render::OVERLAY_GEOM;
-        let pressed = crate::render::OVERLAY_PRESSED.load(std::sync::atomic::Ordering::Relaxed);
-        for i in 0..12 {
-            let x = x0 + i * (bw + gap);
-            let bg = if i == pressed { [0.95, 0.75, 0.2, 0.85] } else { [0.08, 0.1, 0.18, 0.5] };
-            rect(x, y0, bw, bh, 12, 8.0, 8.0, bg);
-            // cifra 5×7 a ×4 = 20×28, centrada
-            rect(x + (bw - 20) / 2, y0 + (bh - 28) / 2, 20, 28, i, 5.0, 7.0, [1.0, 1.0, 1.0, 0.95]);
+        let cell = |c: u8| -> [f32; 4] {
+            let i = (c.max(32) - 32) as i32;
+            [((i % 16) * 10) as f32, ((i / 16) * 20) as f32, 10.0, 20.0]
+        };
+        let block = cell(127);
+        let rect = |verts: &mut Vec<Vertex>, x: i32, y: i32, w: i32, h: i32, col: [f32; 4]| {
+            quad(verts, x, y, w, h, [block[0] + 2.0, block[1] + 2.0, 4.0, 4.0], col)
+        };
+        let text = |verts: &mut Vec<Vertex>, x: i32, y: i32, s: &str, col: [f32; 4]| {
+            let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(s);
+            for (k, &b) in bytes.iter().enumerate() {
+                if b != b' ' {
+                    quad(verts, x + k as i32 * 10, y, 10, 20, cell(b), col);
+                }
+            }
+        };
+        let mut verts: Vec<Vertex> = Vec::new();
+        let mut image: Option<(AtlasRef, i32, i32, i32, i32)> = None;
+        if let Some(p) = &page {
+            rect(&mut verts, 0, 0, win_w, win_h, [0.02, 0.03, 0.08, 0.93]);
+            rect(&mut verts, 0, 0, win_w, 30, [0.15, 0.25, 0.55, 1.0]);
+            text(&mut verts, 12, 5, &p.title, [1.0, 0.9, 0.4, 1.0]);
+            if let Some(img) = p.image {
+                // imagen centrada, escalada para caber entre título y pie
+                self.ensure(img);
+                if let Some(r) = self.get_rect(img).copied() {
+                    let (aw, ah) = (win_w - 20, win_h - 70);
+                    let s = ((aw as f32 / r.w as f32).min(ah as f32 / r.h as f32)).max(0.01);
+                    let s = if s >= 1.0 { s.floor() } else { s };
+                    let (w, h) = ((r.w as f32 * s) as i32, (r.h as f32 * s) as i32);
+                    image = Some((img, (win_w - w) / 2, 34 + (ah - h) / 2, w, h));
+                }
+            }
+            for (k, line) in p.lines.iter().skip(p.scroll).take(crate::render::PAGE_LINES).enumerate() {
+                let y = 38 + k as i32 * 22;
+                let idx = p.scroll + k;
+                if p.selected == Some(idx) {
+                    rect(&mut verts, 6, y - 1, win_w - 12, 22, [0.95, 0.75, 0.2, 0.35]);
+                }
+                text(&mut verts, 14, y, line, [1.0, 1.0, 1.0, 1.0]);
+            }
+            if p.lines.len() > crate::render::PAGE_LINES {
+                let more = format!("{}-{} / {}", p.scroll + 1, (p.scroll + crate::render::PAGE_LINES).min(p.lines.len()), p.lines.len());
+                text(&mut verts, win_w - 14 - more.len() as i32 * 10, 5, &more, [0.8, 0.8, 0.8, 1.0]);
+            }
+            rect(&mut verts, 0, win_h - 28, win_w, 28, [0.15, 0.25, 0.55, 1.0]);
+            text(&mut verts, 12, win_h - 24, &p.footer, [1.0, 1.0, 1.0, 1.0]);
+        } else {
+            let pressed = crate::render::OVERLAY_PRESSED.load(std::sync::atomic::Ordering::Relaxed);
+            for i in 0..crate::render::OVERLAY_KEYS.len() {
+                let (x, y, w, h) = crate::render::overlay_button(i);
+                let bg = if i as i32 == pressed { [0.95, 0.75, 0.2, 0.85] } else { [0.08, 0.1, 0.18, 0.5] };
+                rect(&mut verts, x, y, w, h, bg);
+                let label = crate::render::OVERLAY_LABELS[i];
+                // texto a doble tamaño, centrado
+                let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(label);
+                let lw = bytes.len() as i32 * 20;
+                for (k, &b) in bytes.iter().enumerate() {
+                    quad(&mut verts, x + (w - lw) / 2 + k as i32 * 20, y + (h - 40) / 2, 20, 40, cell(b), [1.0, 1.0, 1.0, 0.95]);
+                }
+            }
         }
-        self.gl.BufferData(
-            gl::ARRAY_BUFFER,
-            (size_of::<Vertex>() * verts.len()) as _,
-            verts.as_ptr().cast(),
-            gl::STREAM_DRAW,
-        );
-        self.gl.DrawArrays(gl::TRIANGLES, 0, verts.len() as i32);
+        self.gl.Uniform1f(u.colour_blending, 1.0);
+        self.gl.Enable(gl::BLEND);
+        self.gl.BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+        // 1) fondos y textos (textura de la fuente)
+        let mut draw = |gl: &gl::Gl, tex: GLuint, size: (i32, i32), verts: &[Vertex]| {
+            if verts.is_empty() {
+                return
+            }
+            gl.BindTexture(gl::TEXTURE_2D, tex);
+            gl.Uniform2f(u.tex_size, size.0 as f32, size.1 as f32);
+            gl.BufferData(gl::ARRAY_BUFFER, (size_of::<Vertex>() * verts.len()) as _, verts.as_ptr().cast(), gl::STREAM_DRAW);
+            gl.DrawArrays(gl::TRIANGLES, 0, verts.len() as i32);
+        };
+        draw(&self.gl, self.overlay_tex, (tw, th), &verts);
+        // 2) imagen de la página (textura del sprite)
+        if let Some((img, x, y, w, h)) = image {
+            if let Some(r) = self.get_rect(img).copied() {
+                if let Some(Some(tex)) = self.texture_ids.get(r.atlas_id as usize).copied() {
+                    let (mut pw, mut ph) = (0, 0);
+                    self.gl.BindTexture(gl::TEXTURE_2D, tex);
+                    self.gl.GetTexLevelParameteriv(gl::TEXTURE_2D, 0, gl::TEXTURE_WIDTH, &mut pw);
+                    self.gl.GetTexLevelParameteriv(gl::TEXTURE_2D, 0, gl::TEXTURE_HEIGHT, &mut ph);
+                    let mut iv = Vec::new();
+                    quad(&mut iv, x, y, w, h, [r.x as f32, r.y as f32, r.w as f32, r.h as f32], [1.0; 4]);
+                    draw(&self.gl, tex, (pw, ph), &iv);
+                }
+            }
+        }
         self.gl.Disable(gl::BLEND);
         let (src, dst) = self.queue_render_state.blend_mode;
         self.gl.BlendFunc(src.into(), dst.into());
     }
+
 
     /// Presenta el búfer del juego en pantalla con escalado entero (o ajustado si no cabe ni a ×1)
     unsafe fn present_quad(&mut self, win_w: i32, win_h: i32, fb_w: i32, fb_h: i32) {
@@ -1040,7 +1091,8 @@ impl RendererImpl {
             return
         }
         let scale = (win_w / fb_w).min(win_h / fb_h);
-        let (w, h) = if scale >= 1 {
+        // escala entera si es al menos x2 (320x180 -> x3); si no (combate 576x324), ajustar a pantalla
+        let (w, h) = if scale >= 2 {
             (fb_w * scale, fb_h * scale)
         } else if win_w * fb_h <= win_h * fb_w {
             (win_w, win_w * fb_h / fb_w)
@@ -1090,10 +1142,8 @@ impl RendererImpl {
         ];
         self.gl.BufferData(gl::ARRAY_BUFFER, (size_of::<Vertex>() * 6) as _, quad.as_ptr().cast(), gl::STREAM_DRAW);
         self.gl.DrawArrays(gl::TRIANGLES, 0, 6);
-        if crate::render::OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
-            self.gl.Viewport(0, 0, win_w, win_h);
-            self.draw_overlay(u, win_w, win_h);
-        }
+        self.gl.Viewport(0, 0, win_w, win_h);
+        self.draw_overlay(u, win_w, win_h);
         // restaurar el estado del juego
         if self.queue_render_state.alpha_blending {
             self.gl.Enable(gl::BLEND);
