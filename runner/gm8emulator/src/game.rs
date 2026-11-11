@@ -127,6 +127,7 @@ mod game_epoch_serde {
 /// Structure which contains all the components of a game.
 thread_local! {
     static PERF_DRAW_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    static PERF_PRESENT_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
 
 pub struct Game {
@@ -2151,7 +2152,9 @@ impl Game {
 
         // Tell renderer to finish the frame
         if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
+            let t = Instant::now();
             self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+            PERF_PRESENT_NS.with(|c| c.set(c.get() + t.elapsed().as_nanos() as u64));
         }
 
         // Clear inputs for this frame
@@ -2392,6 +2395,8 @@ impl Game {
         // registro de rendimiento cada 5 s (siempre en la Vita; en PC con RLD_PERF)
         let perf_on = cfg!(target_os = "vita") || std::env::var_os("RLD_PERF").is_some();
         let (mut perf_t0, mut perf_frames, mut perf_busy) = (Instant::now(), 0u32, 0u64);
+        #[cfg(target_os = "vita")]
+        let mut vsync_on = true;
         loop {
             self.process_window_events();
 
@@ -2414,14 +2419,16 @@ impl Game {
                 let el = perf_t0.elapsed();
                 if el >= Duration::from_secs(5) {
                     let draw = PERF_DRAW_NS.with(|c| c.replace(0));
+                    let pres = PERF_PRESENT_NS.with(|c| c.replace(0));
                     let f = perf_frames.max(1) as f64;
                     let room = self.assets.rooms.get_asset(self.room.id).map(|r| r.name.decode_utf8().into_owned()).unwrap_or_default();
                     crate::startlog(&format!(
-                        "rendimiento: {:.1} FPS (objetivo {}) | por fotograma {:.1} ms lógica, {:.1} ms dibujo | sala {} '{}' | {} instancias",
+                        "rendimiento: {:.1} FPS (objetivo {}) | por fotograma {:.1} ms lógica, {:.1} ms dibujo, {:.1} ms presentación | sala {} '{}' | {} instancias",
                         f / el.as_secs_f64(),
                         self.room.speed,
-                        (perf_busy.saturating_sub(draw)) as f64 / f / 1e6,
+                        (perf_busy.saturating_sub(draw + pres)) as f64 / f / 1e6,
                         draw as f64 / f / 1e6,
+                        pres as f64 / f / 1e6,
                         self.room.id,
                         room,
                         self.room.instance_list.count_all(),
@@ -2453,6 +2460,17 @@ impl Game {
             // frame limiter
             let diff = Instant::now().duration_since(time_now);
             let duration = Duration::from_nanos(1_000_000_000 / self.room.speed as u64);
+            // Vita: sincronización vertical adaptativa. Con la espera al refresco (60 Hz) un fotograma que
+            // pasa de 33 ms se alarga hasta el siguiente refresco (40 ms -> 50 ms: de 25 a 20 FPS). Si el
+            // fotograma ya va tarde se presenta sin esperar; si va sobrado, con espera (sin desgarros).
+            #[cfg(target_os = "vita")]
+            {
+                let want = diff + Duration::from_millis(3) < duration;
+                if want != vsync_on {
+                    vsync_on = want;
+                    self.renderer.set_vsync(want);
+                }
+            }
             if let GameClock::SpoofedNanos(t) = &mut self.clock {
                 *t += duration.as_nanos();
                 self.fps = self.room.speed.into();

@@ -28,6 +28,9 @@ pub struct Compiler {
     /// Lookup table of unique field names
     fields: Vec<Box<[u8]>>,
 
+    /// Índice nombre → id de `fields` (la búsqueda lineal costaba mucho con los miles de variables del juego)
+    field_index: HashMap<Box<[u8]>, usize>,
+
     /// Acelerador del port: id de la script despachadora `ex` de Pokémon Reloaded, si es exactamente
     /// `return script_execute(argument0,...,argument15);`. Entonces `ex(N, ...)` con N constante se
     /// compila como llamada directa a la script N (evita una llamada a script + script_execute).
@@ -43,6 +46,7 @@ impl Compiler {
             script_names: HashMap::new(),
             extension_fn_names: HashMap::new(),
             fields: Vec::new(),
+            field_index: HashMap::new(),
             inline_ex: None,
         }
     }
@@ -450,7 +454,7 @@ impl Compiler {
 
     /// Searches for the fieldname id.
     pub fn find_field_id(&self, name: &[u8]) -> Option<usize> {
-        self.fields.iter().position(|x| x.as_ref() == name)
+        self.field_index.get(name).copied()
     }
 
     /// Gets the unique id of a fieldname, registering one if it doesn't already exist.
@@ -461,6 +465,7 @@ impl Compiler {
             // Note: this isn't thread-safe. Add a mutex lock if you want it to be thread-safe.
             let i = self.fields.len();
             self.fields.push(name.to_vec().into_boxed_slice());
+            self.field_index.insert(name.to_vec().into_boxed_slice(), i);
             i
         }
     }

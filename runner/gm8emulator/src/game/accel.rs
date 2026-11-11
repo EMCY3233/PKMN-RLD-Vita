@@ -102,8 +102,34 @@ pub fn rewrite_script(scripts: &[Option<Box<Script>>], id: usize, src: gml::Stri
                 _ => src,
             }
         },
+        // GetBattleEffect: ~100 llamadas por fotograma en combate, cada una evaluando en cadena más de
+        // 100 comparaciones `argument0=(N) ||` para acabar casi siempre en `return noone` porque el
+        // efecto no existe. Todas sus ramas empiezan con `if(!instance_exists(argument0))return noone;`
+        // y si ninguna coincide también devuelve noone: comprobarlo al principio da el mismo resultado.
+        b"GetBattleEffect" if battle_effect_ok(src.as_ref()) => {
+            let text = String::from_utf8_lossy(src.as_ref()).into_owned();
+            crate::startlog("Acelerador: GetBattleEffect -> salida rápida si el efecto no existe");
+            let new = text.replacen(
+                "var i, ef; ",
+                "var i, ef; if(is_real(argument0)){if(!instance_exists(argument0))return noone;} ",
+                1,
+            );
+            gml::String::from(new.into_bytes())
+        },
         _ => src,
     }
+}
+
+/// Comprueba que GetBattleEffect tiene la forma en la que la salida rápida es equivalente
+fn battle_effect_ok(src: &[u8]) -> bool {
+    let t = String::from_utf8_lossy(src);
+    let t = t.trim();
+    let count = |p: &str| t.matches(p).count();
+    let groups = count("if(argument0=(");
+    let guarded = count("){ if(!instance_exists(argument0))return noone;");
+    let uses = count("argument0");
+    let known = count("argument0=(") + count("instance_exists(argument0)") + count("instance_find(argument0,") + count("instance_number(argument0)");
+    t.starts_with("var i, ef; if(argument0=(") && t.ends_with("return noone;") && groups > 0 && groups == guarded && uses == known
 }
 
 /// ¿El bucle usa ex(9485, …) = RoundToTwo tal y como lo replica rld_secpk2_sum?

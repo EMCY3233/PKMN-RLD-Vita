@@ -40,6 +40,8 @@ pub struct Bench {
 pub enum ProfKey {
     Script(usize),
     Func(usize),
+    /// evento de objeto: (objeto, tipo de evento, subevento)
+    Event(i32, u16, u32),
 }
 
 impl Bench {
@@ -87,6 +89,23 @@ impl Game {
                 .find(|(_, f)| f.addr() as usize == addr)
                 .map(|(n, _)| format!("{}()", n))
                 .unwrap_or_else(|| format!("fn@{:x}", addr)),
+            ProfKey::Event(obj, ev, sub) => {
+                let name = self.assets.objects.get_asset(obj).map(|o| String::from_utf8_lossy(o.name.as_ref()).into_owned()).unwrap_or_default();
+                let evn = match ev { 0 => "create", 1 => "destroy", 2 => "alarm", 3 => "step", 4 => "collision", 5 => "keyboard", 6 => "mouse", 7 => "other", 8 => "draw", 9 => "keypress", 10 => "keyrelease", _ => "?" };
+                format!("{} [{} {}]", name, evn, sub)
+            },
+        }
+    }
+
+    /// Entrada en un evento de objeto (solo con RLD_PROFILE=1)
+    #[inline]
+    pub fn bench_enter_event(&mut self, obj: i32, ev: usize, sub: u32) -> bool {
+        match self.bench.as_mut() {
+            Some(b) if b.prof_all => {
+                b.prof_stack.push((ProfKey::Event(obj, ev as u16, sub), Instant::now(), 0.0));
+                true
+            },
+            _ => false,
         }
     }
 
@@ -282,9 +301,9 @@ impl Game {
                 v.sort_by(|a, b| b.1 .1.partial_cmp(&a.1 .1).unwrap_or(std::cmp::Ordering::Equal));
                 let measured: f64 = v.iter().map(|x| x.1 .1).sum();
                 b.line(&format!("PERFIL (tiempo propio, todo el recorrido): medido {:.1} s de {:.1} s; resto = motor (eventos, colisiones automáticas, dibujado)", measured, total));
-                for kind in ["script", "función"] {
+                for kind in ["evento", "script", "función"] {
                     b.line(&format!("  -- top {}s --", kind));
-                    for (k, (calls, secs)) in v.iter().filter(|(k, _)| matches!((k, kind), (ProfKey::Script(_), "script") | (ProfKey::Func(_), "función"))).take(30) {
+                    for (k, (calls, secs)) in v.iter().filter(|(k, _)| matches!((k, kind), (ProfKey::Script(_), "script") | (ProfKey::Func(_), "función") | (ProfKey::Event(..), "evento"))).take(30) {
                         let l = format!("  {:6.2} s {:5.1}% {:>10} llamadas  {:8.2} µs/llamada  {}", secs, secs / total * 100.0, calls, secs / *calls as f64 * 1e6, self.prof_name(*k));
                         b.line(&l);
                     }

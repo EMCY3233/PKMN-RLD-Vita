@@ -77,7 +77,11 @@ impl Game {
                 }
             };
 
+            let prof = self.bench_enter_event(object_id, event_id, event_sub);
             let res = self.execute_tree(event, instance, other, event_id, event_sub as _, object_id);
+            if prof {
+                self.bench_exit();
+            }
             match res {
                 Err(e) if self.errors_continue && !matches!(e, gml::Error::EndOfRoomOrder) => {
                     // GM8 (sin "Abortar en todos los errores") muestra el error y deja seguir: aquí se
