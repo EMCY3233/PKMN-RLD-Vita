@@ -2892,8 +2892,10 @@ impl RendererTrait for RendererImpl {
     }
 
     fn set_alpha_blending(&mut self, alphablend: bool) {
-        self.next_render_state.alpha_blending = alphablend;
-        self.render_state_updated = true;
+        if self.next_render_state.alpha_blending != alphablend {
+            self.next_render_state.alpha_blending = alphablend;
+            self.render_state_updated = true;
+        }
     }
 
     fn get_colour_blending(&self) -> bool {
@@ -2901,8 +2903,11 @@ impl RendererTrait for RendererImpl {
     }
 
     fn set_colour_blending(&mut self, modulate: bool) {
-        self.next_render_state.texture_blend = modulate.into();
-        self.render_state_updated = true;
+        let v: GLBool = modulate.into();
+        if self.next_render_state.texture_blend != v {
+            self.next_render_state.texture_blend = v;
+            self.render_state_updated = true;
+        }
     }
 
     fn get_blend_mode(&self) -> (BlendType, BlendType) {
@@ -2910,8 +2915,10 @@ impl RendererTrait for RendererImpl {
     }
 
     fn set_blend_mode(&mut self, src: BlendType, dst: BlendType) {
-        self.next_render_state.blend_mode = (src, dst);
-        self.render_state_updated = true;
+        if self.next_render_state.blend_mode != (src, dst) {
+            self.next_render_state.blend_mode = (src, dst);
+            self.render_state_updated = true;
+        }
     }
 
     fn get_pixel_interpolation(&self) -> bool {
@@ -2921,8 +2928,11 @@ impl RendererTrait for RendererImpl {
     fn set_pixel_interpolation(&mut self, lerping: bool) {
         // in DX (and therefore GM) this is set per texture unit, but in GL it's per texture
         // therefore, we need to apply the setting before every draw call
-        self.next_render_state.interpolate_pixels = lerping.into();
-        self.render_state_updated = true;
+        let v: GLBool = lerping.into();
+        if self.next_render_state.interpolate_pixels != v {
+            self.next_render_state.interpolate_pixels = v;
+            self.render_state_updated = true;
+        }
     }
 
     fn get_texture_repeat(&self) -> bool {
@@ -2930,8 +2940,11 @@ impl RendererTrait for RendererImpl {
     }
 
     fn set_texture_repeat(&mut self, repeat: bool) {
-        self.next_render_state.texture_repeat = repeat.into();
-        self.render_state_updated = true;
+        let v: GLBool = repeat.into();
+        if self.next_render_state.texture_repeat != v {
+            self.next_render_state.texture_repeat = v;
+            self.render_state_updated = true;
+        }
     }
 
     /// Does anything that's queued to be done.
@@ -2960,6 +2973,9 @@ impl RendererTrait for RendererImpl {
     }
 
     fn set_model_matrix(&mut self, model: [f32; 16]) {
+        if self.next_render_state.model_matrix == model {
+            return
+        }
         self.next_render_state.model_matrix = model;
         self.render_state_updated = true;
     }
