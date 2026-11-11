@@ -9344,7 +9344,12 @@ impl Game {
             Err(_) => return Ok((-1).into()),
         };
         let sound_id = self.assets.sounds.len() as i32;
-        let handle = match path_buf.extension().and_then(std::ffi::OsStr::to_str) {
+        let ext = path_buf.extension().and_then(std::ffi::OsStr::to_str).map(|e| e.to_ascii_lowercase());
+        let handle = match ext.as_deref() {
+            Some("mid") | Some("midi") => match self.audio.add_midi(data, sound_id as i32, 1.0, false) {
+                Some(x) => asset::sound::FileType::Midi(x),
+                None => return Ok((-1).into()),
+            },
             Some("mp3") => match self.audio.add_mp3(data, sound_id as i32) {
                 Some(x) => asset::sound::FileType::Mp3(x),
                 None => return Ok((-1).into()),
@@ -9370,35 +9375,37 @@ impl Game {
             self.audio.stop_sound(sound_id);
             sound.gml_kind = kind.into();
             sound.gml_preload = f64::from(u8::from(preload)).into();
-
-            if matches!(sound.handle, asset::sound::FileType::None) {
-                let path_buf = std::path::PathBuf::from(file::to_path(fname.as_ref()).as_ref());
-                let data = match file::read_any(&path_buf.to_string_lossy()) {
-                    Ok(b) => b.into_boxed_slice(),
-                    Err(_) => return Ok(0.into()),
-                };
-                let ext = path_buf.extension().and_then(std::ffi::OsStr::to_str).map(|e| e.to_ascii_lowercase());
-                sound.handle = match ext.as_deref() {
-                    // MIDI no está soportado: se acepta en silencio para que el juego no muestre errores
-                    // (en el port los MIDI se convierten a MP3 con update_port.sh)
-                    Some("mid") | Some("midi") => return Ok(1.into()),
-                    Some("mp3") => match self.audio.add_mp3(data, sound_id as i32) {
-                        Some(x) => asset::sound::FileType::Mp3(x),
-                        None => return Ok(0.into()),
-                    },
-                    Some("wav") => match self.audio.add_wav(data, sound_id as i32, 1.0, kind == 2, kind >= 3) {
-                        Some(x) => asset::sound::FileType::Wav(x),
-                        None => return Ok(0.into()),
-                    },
-                    _ => return Ok(0.into()),
-                };
-                Ok(1.into())
-            } else {
-                // This appears to be a GM8 bug, I could never get it to actually load the new sound if
-                // the one we're replacing already had a sound loaded. (tested GM 8.1.141)
-                sound.handle = asset::sound::FileType::None;
-                Ok(1.into())
-            }
+            // Pokémon Reloaded cambia la música con sound_replace sobre el mismo sonido (52) en cada
+            // zona. La regla de OpenGMK (si ya tenía datos, dejarlo vacío sin cargar el nuevo) dejaba
+            // sin música una de cada dos zonas; aquí siempre se carga el archivo nuevo, como hace el
+            // port de Android.
+            let path_buf = std::path::PathBuf::from(file::to_path(fname.as_ref()).as_ref());
+            let data = match file::read_any(&path_buf.to_string_lossy()) {
+                Ok(b) => b.into_boxed_slice(),
+                Err(_) => return Ok(0.into()),
+            };
+            let ext = path_buf.extension().and_then(std::ffi::OsStr::to_str).map(|e| e.to_ascii_lowercase());
+            let is_mp3_wav = data.len() >= 22 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" && data[20] == 0x55 && data[21] == 0;
+            sound.handle = match ext.as_deref() {
+                Some("mid") | Some("midi") => match self.audio.add_midi(data, sound_id as i32, 1.0, false) {
+                    Some(x) => asset::sound::FileType::Midi(x),
+                    None => return Ok(0.into()),
+                },
+                Some("mp3") => match self.audio.add_mp3(data, sound_id as i32) {
+                    Some(x) => asset::sound::FileType::Mp3(x),
+                    None => return Ok(0.into()),
+                },
+                Some("wav") if is_mp3_wav => match self.audio.add_mp3(data, sound_id as i32) {
+                    Some(x) => asset::sound::FileType::Mp3(x),
+                    None => return Ok(0.into()),
+                },
+                Some("wav") => match self.audio.add_wav(data, sound_id as i32, 1.0, kind == 2, kind >= 3) {
+                    Some(x) => asset::sound::FileType::Wav(x),
+                    None => return Ok(0.into()),
+                },
+                _ => return Ok(0.into()),
+            };
+            Ok(1.into())
         } else {
             Err(gml::Error::FunctionError("sound_replace".into(), "Trying to replace non-existing sound.".into()))
         }
@@ -12667,6 +12674,7 @@ impl Game {
             let nanos = self.clock.as_nanos();
             match &sound.handle {
                 FileType::Mp3(handle) => self.audio.play_mp3(handle, nanos),
+                FileType::Midi(handle) => self.audio.play_midi(handle, nanos),
                 FileType::Wav(handle) => self.audio.play_wav(handle, nanos),
                 FileType::None => (),
             }
@@ -12682,6 +12690,7 @@ impl Game {
             use asset::sound::FileType;
             match &sound.handle {
                 FileType::Mp3(handle) => self.audio.loop_mp3(handle),
+                FileType::Midi(handle) => self.audio.loop_midi(handle),
                 FileType::Wav(handle) => self.audio.loop_wav(handle),
                 FileType::None => (),
             }
@@ -12715,6 +12724,7 @@ impl Game {
             use asset::sound::FileType;
             match &sound.handle {
                 FileType::Wav(handle) => handle.set_volume(volume.into()),
+                FileType::Midi(handle) => handle.set_volume(volume.into()),
                 FileType::Mp3(_) => (),
                 FileType::None => (),
             }

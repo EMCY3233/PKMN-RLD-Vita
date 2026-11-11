@@ -149,6 +149,9 @@ backends! {
     /// andrewrk's libsoundio
     mod sio => SoundIo if feature = "soundio",
 
+    /// PS Vita (sceAudioOut)
+    mod vita => Vita if target_os = "vita",
+
     // Windows Audio Session API (WASAPI)
     //mod wasapi => Wasapi if all(target_os = "windows", feature = "wasapi"),
 

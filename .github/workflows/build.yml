@@ -151,6 +151,7 @@ jobs:
             -a "$LA/bg.png=sce_sys/livearea/contents/bg.png" \
             -a "$LA/startup.png=sce_sys/livearea/contents/startup.png" \
             -a "$LA/template.xml=sce_sys/livearea/contents/template.xml" \
+            -a "$GITHUB_WORKSPACE/vita/soundfont.sf2=soundfont.sf2" \
             ReloadedGL.vpk
           rm -f gm8emulator.vpk
       - uses: actions/upload-artifact@v4

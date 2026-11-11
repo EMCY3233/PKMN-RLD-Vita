@@ -250,6 +250,27 @@ fn simple_shader_source(src: &str, fragment: bool) -> std::ffi::CString {
 /// gráfica (178 MB en RGBA frente a 112 MB de VRAM), así que se descomprimen al dibujarlos por
 /// primera vez y se colocan en páginas de 1024×1024. Si se supera el presupuesto, se vacía la
 /// página usada hace más tiempo (sus sprites se volverán a cargar si hacen falta).
+/// Entrega los vértices para el siguiente glDrawArrays. Vita: desde la memoria del programa (vitaGL los
+/// copia a su búfer circular del fotograma; glBufferData reservaba memoria de vídeo en cada llamada).
+/// PC: en el VBO, como siempre. Todos los dibujos deben pasar por aquí: si uno usa glBufferData con el
+/// VBO desenlazado, vitaGL accede a memoria inválida.
+unsafe fn submit_vertices(gl: &gl::Gl, verts: &[Vertex]) {
+    #[cfg(target_os = "vita")]
+    {
+        gl.BindBuffer(gl::ARRAY_BUFFER, 0);
+        let base = verts.as_ptr() as *const u8;
+        let st = size_of::<Vertex>() as i32;
+        let attr = |i: u32, n: i32, off: usize| gl.VertexAttribPointer(i, n, gl::FLOAT, gl::FALSE, st, base.add(off).cast());
+        attr(0, 3, offset_of!(Vertex, pos));
+        attr(1, 4, offset_of!(Vertex, blend));
+        attr(2, 2, offset_of!(Vertex, tex_coord));
+        attr(3, 3, offset_of!(Vertex, normal));
+        attr(4, 4, offset_of!(Vertex, atlas_xywh));
+    }
+    #[cfg(not(target_os = "vita"))]
+    gl.BufferData(gl::ARRAY_BUFFER, (size_of::<Vertex>() * verts.len()) as _, verts.as_ptr().cast(), gl::STREAM_DRAW);
+}
+
 #[cfg(target_os = "vita")]
 fn platform_mem_report() -> String {
     vgl::mem_report()
@@ -1075,7 +1096,7 @@ impl RendererImpl {
             }
             gl.BindTexture(gl::TEXTURE_2D, tex);
             gl.Uniform2f(u.tex_size, size.0 as f32, size.1 as f32);
-            gl.BufferData(gl::ARRAY_BUFFER, (size_of::<Vertex>() * verts.len()) as _, verts.as_ptr().cast(), gl::STREAM_DRAW);
+            submit_vertices(gl, verts);
             gl.DrawArrays(gl::TRIANGLES, 0, verts.len() as i32);
         };
         draw(&self.gl, self.overlay_tex, (tw, th), &verts);
@@ -1155,7 +1176,7 @@ impl RendererImpl {
             v(1.0, -1.0, 1.0, 1.0),
             v(-1.0, -1.0, 0.0, 1.0),
         ];
-        self.gl.BufferData(gl::ARRAY_BUFFER, (size_of::<Vertex>() * 6) as _, quad.as_ptr().cast(), gl::STREAM_DRAW);
+        submit_vertices(&self.gl, &quad);
         self.gl.DrawArrays(gl::TRIANGLES, 0, 6);
         self.gl.Viewport(0, 0, win_w, win_h);
         self.draw_overlay(u, win_w, win_h);
@@ -1323,17 +1344,7 @@ impl RendererImpl {
             // memoria casi llena se fragmenta: el dibujo se iba haciendo cada vez más lento.
             #[cfg(target_os = "vita")]
             {
-                self.gl.BindBuffer(gl::ARRAY_BUFFER, 0);
-                let base = buffer.as_ptr() as *const u8;
-                let st = size_of::<Vertex>() as i32;
-                let attr = |gl: &gl::Gl, i: u32, n: i32, off: usize| {
-                    gl.VertexAttribPointer(i, n, gl::FLOAT, gl::FALSE, st, base.add(off).cast());
-                };
-                attr(&self.gl, 0, 3, offset_of!(Vertex, pos));
-                attr(&self.gl, 1, 4, offset_of!(Vertex, blend));
-                attr(&self.gl, 2, 2, offset_of!(Vertex, tex_coord));
-                attr(&self.gl, 3, 3, offset_of!(Vertex, normal));
-                attr(&self.gl, 4, 4, offset_of!(Vertex, atlas_xywh));
+                submit_vertices(&self.gl, buffer);
                 self.gl.DrawArrays(shape.into(), 0, buffer.len() as i32);
                 return
             }

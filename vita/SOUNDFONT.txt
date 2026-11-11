@@ -1,0 +1,4 @@
+soundfont.sf2 = TimGM6mb (SoundFont General MIDI de 6 MB), de Tim Brechbill.
+Licencia GPL-2.0 (la misma que el runner). Copia tomada del port de Android pokemon-reloaded-android.
+El runner lo busca en ux0:data/reloaded/soundfont.sf2 y, si no está, en el VPK (app0:soundfont.sf2):
+para usar otro SoundFont General MIDI basta con copiarlo con ese nombre a ux0:data/reloaded/.

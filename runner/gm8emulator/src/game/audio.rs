@@ -1,3 +1,4 @@
+pub mod midi;
 mod mixer;
 mod mp3;
 
@@ -89,13 +90,17 @@ impl Source for InterprocessSource {
     fn reset(&mut self) {}
 }
 
+pub use self::midi::MidiHandle;
+
 impl AudioManager {
     pub fn new(do_output: bool, capture_audio: bool) -> Self {
         // TODO: not all these unwraps
-        // PC: libsoundio. Vita/sin escritorio: backend Dummy (de momento sin sonido; luego sceAudio)
+        // PC: libsoundio. PS Vita: sceAudioOut (udon/session/vita.rs). Sin escritorio en PC: sin sonido
         #[cfg(feature = "desktop")]
         let session = Session::new(Api::SoundIo).unwrap();
-        #[cfg(not(feature = "desktop"))]
+        #[cfg(target_os = "vita")]
+        let session = Session::new(Api::Vita).unwrap();
+        #[cfg(all(not(feature = "desktop"), not(target_os = "vita")))]
         let session = Session::new(Api::Dummy).unwrap();
         let device = session.default_output_device().unwrap();
         let sample_rate = device.sample_rate();
@@ -266,6 +271,45 @@ impl AudioManager {
                     handle.id,
                 );
             }
+        }
+    }
+
+    /// Carga un MIDI. No se sintetiza nada aquí: se genera por bloques mientras suena.
+    pub fn add_midi(&mut self, data: Box<[u8]>, sound_id: i32, volume: f64, exclusive: bool) -> Option<MidiHandle> {
+        MidiHandle::new(data, sound_id, volume, exclusive)
+    }
+
+    pub fn play_midi(&mut self, handle: &MidiHandle, start_time: u128) {
+        let end_time = length_to_ns(handle.length(), handle.sample_rate(), handle.channel_count()) + start_time;
+        if handle.exclusive {
+            self.multimedia_end = Some((handle.id, Some(end_time)));
+        } else if self.end_times.get(&handle.id) != Some(&None) {
+            self.end_times.insert(handle.id, Some(end_time));
+        }
+        self.start_midi(handle, false);
+    }
+
+    pub fn loop_midi(&mut self, handle: &MidiHandle) {
+        if handle.exclusive {
+            self.multimedia_end = Some((handle.id, None));
+        } else {
+            self.end_times.insert(handle.id, None);
+        }
+        // el secuenciador repite el archivo él mismo: la fuente no termina
+        self.start_midi(handle, true);
+    }
+
+    fn start_midi(&mut self, handle: &MidiHandle, looping: bool) {
+        if !self.do_output {
+            return
+        }
+        if let Some(source) = handle.source(looping) {
+            let src = Rechanneler::new(Resampler::new(source, self.mixer_sample_rate), self.mixer_channel_count);
+            let _ = if handle.exclusive {
+                self.mixer_handle.add_exclusive(src, handle.id)
+            } else {
+                self.mixer_handle.add(src, handle.params.clone(), handle.id)
+            };
         }
     }
 

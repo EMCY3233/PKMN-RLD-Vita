@@ -33,6 +33,8 @@ gl_generator = "0.14"
 winres = "0.1"
 
 [dependencies]
+# Sintetizador MIDI (música del juego), Rust puro
+rustysynth = "=1.3.6"
 flate2 = "1"
 bincode = "1.3.3"
 byteorder = "1.5"

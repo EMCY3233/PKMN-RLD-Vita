@@ -1,5 +1,5 @@
 use crate::{
-    game::audio::{Mp3Handle, WavHandle},
+    game::audio::{MidiHandle, Mp3Handle, WavHandle},
     gml,
     math::Real,
 };
@@ -16,6 +16,7 @@ pub struct Sound {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum FileType {
     Mp3(Mp3Handle),
+    Midi(MidiHandle),
     Wav(WavHandle),
     None,
 }

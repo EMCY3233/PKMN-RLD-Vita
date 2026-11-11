@@ -474,6 +474,28 @@ impl Game {
                     }
                     std::fs::create_dir_all(path)
                 };
+                // PS Vita: una sola carpeta temporal fija (ux0:data/reloaded/temp) que se vacía al arrancar.
+                // GM8 crea gm_ttt_<número> en %TEMP% y la borra al salir; en la Vita se iban acumulando en
+                // la carpeta del juego. También se borran las que dejaron versiones anteriores.
+                #[cfg(target_os = "vita")]
+                let vita_temp = {
+                    let base = std::env::current_dir().unwrap_or_default();
+                    if let Ok(rd) = std::fs::read_dir(&base) {
+                        for e in rd.flatten() {
+                            if e.file_name().to_string_lossy().starts_with("gm_ttt_") && e.path().is_dir() {
+                                let _ = std::fs::remove_dir_all(e.path());
+                            }
+                        }
+                    }
+                    let t = base.join("temp");
+                    let _ = std::fs::remove_dir_all(&t);
+                    std::fs::create_dir_all(&t).ok().map(|_| t)
+                };
+                #[cfg(not(target_os = "vita"))]
+                let vita_temp: Option<PathBuf> = None;
+                if let Some(t) = vita_temp {
+                    dir = t;
+                } else
                 // try making folders
                 if let Err(e) = make_temp_dir(&mut dir) {
                     eprintln!("Could not create temp folder in {:?}: {}", dir, e);
