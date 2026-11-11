@@ -24,6 +24,35 @@ pub struct Pak {
     dirs: HashSet<String>,
     /// carpeta del juego normalizada (minúsculas, '/', con '/' final)
     base: String,
+    /// Archivos del paquete que además existen sueltos en disco (partidas, configuración o lo que el
+    /// juego haya escrito): esos se leen del disco. Para todo lo demás se va directo al paquete sin
+    /// intentar abrir el archivo suelto (en la Vita cada intento fallido en la tarjeta cuesta tiempo).
+    on_disk: Mutex<HashSet<String>>,
+}
+
+/// Recorre la carpeta del juego y apunta los archivos sueltos que también están en el paquete
+fn scan_disk(game_dir: &Path, index: &HashMap<String, (u64, u32)>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut stack = vec![game_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let path = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                if name != "temp" && !name.starts_with("gm_ttt_") {
+                    stack.push(path);
+                }
+            } else if let Ok(rel) = path.strip_prefix(game_dir) {
+                let k = norm(&rel.to_string_lossy());
+                if index.contains_key(&k) {
+                    out.insert(k);
+                }
+            }
+        }
+    }
+    out
 }
 
 static PAK: OnceLock<Option<Pak>> = OnceLock::new();
@@ -179,7 +208,8 @@ fn open(game_dir: &Path) -> std::io::Result<Pak> {
     let deleted = std::fs::read_to_string(&deleted_file)
         .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
         .unwrap_or_default();
-    Ok(Pak { deleted: Mutex::new(deleted), deleted_file, file: Mutex::new(f), index, dirs, base })
+    let on_disk = Mutex::new(scan_disk(game_dir, &index));
+    Ok(Pak { deleted: Mutex::new(deleted), deleted_file, file: Mutex::new(f), index, dirs, base, on_disk })
 }
 
 fn get() -> Option<&'static Pak> {
@@ -240,6 +270,11 @@ pub fn written(path: &str) {
     invalidate(path);
     if let Some(p) = get() {
         if let Some(k) = key(p, path) {
+            if p.index.contains_key(&k) {
+                if let Ok(mut d) = p.on_disk.lock() {
+                    d.insert(k.clone());
+                }
+            }
             if let Ok(mut d) = p.deleted.lock() {
                 if d.remove(&k) {
                     save_deleted(p, &d);
@@ -281,8 +316,29 @@ pub fn describe(path: &str) -> String {
     }
 }
 
+/// ¿Está `path` en el paquete y no suelto en disco? (entonces se lee del paquete directamente)
+pub fn packed_only(path: &str) -> bool {
+    get()
+        .and_then(|p| {
+            key(p, path).map(|k| {
+                p.index.contains_key(&k) && !is_deleted(p, &k) && !p.on_disk.lock().map(|d| d.contains(&k)).unwrap_or(true)
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Lee un archivo del disco o, si no existe, del paquete.
 pub fn read_any(path: &str) -> std::io::Result<Vec<u8>> {
+    // archivo del paquete que no está suelto en disco: directo al paquete
+    if let Some(p) = get() {
+        if let Some(k) = key(p, path) {
+            if p.index.contains_key(&k) && !p.on_disk.lock().map(|d| d.contains(&k)).unwrap_or(true) {
+                if let Some(b) = read(path) {
+                    return Ok(b)
+                }
+            }
+        }
+    }
     match std::fs::read(path) {
         Ok(b) => Ok(b),
         Err(e) => read(path).ok_or(e),

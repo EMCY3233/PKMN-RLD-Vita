@@ -100,6 +100,9 @@ impl AudioManager {
         let session = Session::new(Api::SoundIo).unwrap();
         #[cfg(target_os = "vita")]
         let session = Session::new(Api::Vita).unwrap();
+        if do_output {
+            midi::preload_soundfont();
+        }
         #[cfg(all(not(feature = "desktop"), not(target_os = "vita")))]
         let session = Session::new(Api::Dummy).unwrap();
         let device = session.default_output_device().unwrap();

@@ -196,6 +196,52 @@ fn keys_text(keys: &str) -> String {
     }
 }
 
+/// Acción de cada tecla en el juego, sacada del mapa original (no del archivo del usuario, cuyos
+/// comentarios dejan de corresponder al cambiar teclas) y completada con las teclas sin botón
+pub fn key_action(key: &str) -> String {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+    let t = TABLE.get_or_init(|| {
+        let mut m = HashMap::new();
+        for (sec, _, keys, d) in parse(DEFAULT_KEYMAP).guide {
+            if sec != "tactil" && !d.is_empty() {
+                m.entry(keys.to_ascii_uppercase()).or_insert(d);
+            }
+        }
+        for (k, d) in [
+            ("NADA", "Sin función"),
+            ("GUIA", "Abrir esta guía"),
+            ("BARRA", "Mostrar/ocultar la barra de números"),
+            ("F8", "Móvil (key_menu_movil)"),
+            ("ESCAPE", "Salir (key_global_salir)"),
+            ("1", "Pokémon 1 en combate"),
+            ("2", "Pokémon 2 en combate"),
+            ("3", "Pokémon 3 en combate"),
+            ("4", "Pokémon 4 en combate"),
+            ("5", "Pokémon 5 en combate / MO"),
+            ("6", "Pokémon 6 en combate / MO"),
+            ("7", "MO"),
+            ("8", "Habilidades externas"),
+            ("9", "Xpod"),
+            ("0", "Comandos (key_menu_comandos)"),
+            ("L", "Áreas"),
+            ("BACKSLASH", "Ver Pokémon"),
+            ("F4", "Pantalla completa (sin uso en Vita)"),
+            ("F7", "Escala de la ventana"),
+            ("F9", "Captura de pantalla"),
+            ("F10", "Música sí/no"),
+            ("UP", "Arriba"),
+            ("DOWN", "Abajo"),
+            ("LEFT", "Izquierda"),
+            ("RIGHT", "Derecha"),
+        ] {
+            m.entry(k.to_string()).or_insert_with(|| d.to_string());
+        }
+        m
+    });
+    t.get(&key.trim().to_ascii_uppercase()).cloned().unwrap_or_default()
+}
+
 impl Keymap {
     /// Líneas de la guía y, para cada línea, la entrada (índice en `guide`) que representa
     pub fn guide_lines(&self) -> (Vec<String>, Vec<Option<usize>>) {
@@ -223,6 +269,8 @@ impl Keymap {
                 map.push(None);
                 last = sec.clone();
             }
+            let action = if editable(sec, btn) { key_action(keys) } else { String::new() };
+            let desc = if action.is_empty() { desc.clone() } else { action };
             let line = format!("  {:<28} {:<20} {}", btn_label(btn), keys_text(keys), desc);
             out.push(line.chars().take(92).collect());
             map.push(if editable(sec, btn) { Some(i) } else { None });
@@ -236,15 +284,9 @@ impl Keymap {
 
     /// Teclas que se pueden asignar, con lo que hace cada una en el juego (según los comentarios)
     pub fn key_choices(&self) -> Vec<(String, String)> {
-        let mut desc: HashMap<String, String> = HashMap::new();
-        for (sec, _, keys, d) in &self.guide {
-            if sec != "tactil" && !d.is_empty() {
-                desc.entry(keys.to_ascii_uppercase()).or_insert_with(|| d.clone());
-            }
-        }
         let mut names: Vec<String> = vec!["NADA".into(), "GUIA".into(), "BARRA".into()];
         for n in ["UP", "DOWN", "LEFT", "RIGHT", "ENTER", "SPACE", "SHIFT", "CTRL", "ESCAPE", "BACKSPACE", "TAB",
-            "PAGEUP", "PAGEDOWN", "HOME", "END", "BACKSLASH"]
+            "PAGEUP", "PAGEDOWN", "HOME", "END", "BACKSLASH", "CTRL+P"]
         {
             names.push(n.into());
         }
@@ -254,40 +296,13 @@ impl Keymap {
         for f in 1..=12 {
             names.push(format!("F{}", f));
         }
-        names
-            .into_iter()
-            .map(|n| {
-                let d = match n.as_str() {
-                    "NADA" => "Sin función".to_string(),
-                    "GUIA" => "Abrir esta guía".to_string(),
-                    "BARRA" => "Mostrar/ocultar la barra de números".to_string(),
-                    _ => desc.get(&n).cloned().unwrap_or_else(|| {
-                        match n.as_str() {
-                            "1" | "2" | "3" | "4" => "Pokémon 1-4 en combate",
-                            "5" | "6" => "Pokémon 5-6 en combate / MO",
-                            "7" => "MO",
-                            "8" => "Habilidades externas",
-                            "9" => "Xpod",
-                            "L" => "Áreas",
-                            "BACKSLASH" => "Ver Pokémon",
-                            "F4" => "Pantalla completa (sin uso en Vita)",
-                            "F7" => "Escala de la ventana",
-                            "F9" => "Captura de pantalla",
-                            "F10" => "Música sí/no",
-                            _ => "",
-                        }
-                        .to_string()
-                    }),
-                };
-                (n, d)
-            })
-            .collect()
+        names.into_iter().map(|n| { let d = key_action(&n); (n, d) }).collect()
     }
 }
 
 /// Cambia el valor de `boton` en la sección `sec` de un keymap.ini conservando el resto del archivo
 /// (comentarios y alineación)
-pub fn set_entry(text: &str, sec: &str, btn: &str, value: &str) -> String {
+pub fn set_entry(text: &str, sec: &str, btn: &str, value: &str, desc: &str) -> String {
     let mut section = String::new();
     let mut out = Vec::new();
     let mut done = false;
@@ -300,8 +315,10 @@ pub fn set_entry(text: &str, sec: &str, btn: &str, value: &str) -> String {
                 if k.trim().eq_ignore_ascii_case(btn) {
                     let (lhs, rest) = raw.split_once('=').unwrap();
                     let mut line = format!("{}= {}", lhs, value);
-                    if let Some(pos) = rest.find(';') {
-                        let comment = &rest[pos..];
+                    // el comentario pasa a describir la tecla nueva (lo que la guía muestra como acción)
+                    let comment = if desc.is_empty() { "; (sin acción conocida)".to_string() } else { format!("; {}", desc) };
+                    {
+                        let pos = rest.find(';').unwrap_or(rest.trim_end().len().max(14));
                         let col = lhs.len() + 1 + pos;
                         while line.len() < col {
                             line.push(' ');
@@ -309,7 +326,7 @@ pub fn set_entry(text: &str, sec: &str, btn: &str, value: &str) -> String {
                         if !line.ends_with(' ') {
                             line.push(' ');
                         }
-                        line.push_str(comment);
+                        line.push_str(&comment);
                     }
                     out.push(line);
                     done = true;
@@ -377,7 +394,7 @@ impl Game {
             };
             if let Some(('a', k)) = self.run_menu(page) {
                 let value = &choices[k].0;
-                text = set_entry(&text, &sec, &btn, value);
+                text = set_entry(&text, &sec, &btn, value, &choices[k].1);
                 changed = true;
                 msg = match std::fs::write(path, &text) {
                     Ok(()) => format!("{} = {} (guardado)", btn_label(&btn), value),

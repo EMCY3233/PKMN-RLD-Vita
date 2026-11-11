@@ -52,3 +52,17 @@ panel trasero = teclas 1-4.
   memoria del programa; las páginas de texturas se reinician al quedar vacías y se compactan al cambiar
   de sala si ocupan más de la mitad del presupuesto. El runner.log incluye lotes, cambios de textura,
   páginas y memoria libre de vitaGL cada 5 s.
+
+## Rendimiento (11/11, tarde)
+- **Lotes de dibujo**: cada lote cambiaba de textura (~0,3 ms por lote en la Vita) porque las fuentes y el
+  píxel blanco de las primitivas estaban en el atlas 0 y los sprites en las páginas diferidas. Ahora las
+  páginas son de 2048² y llevan una copia del atlas 0 en su esquina (0,0); `setup_queue` sigue en la página
+  cuando llega algo del atlas 0. Ruta 1: ~35 → ~1 lote por fotograma; combate: ~15 → ~2. Imagen idéntica
+  píxel a píxel (RLD_NO_MIRROR=1 para comparar).
+- **Atlas de fuentes**: se creaba de 4096×4096 (64 MB de CDRAM) para 4096×221 ocupados. Ahora, con texturas
+  diferidas, máximo 2048 de ancho y la textura del tamaño ocupado (2048×512, 4 MB).
+- **Música**: el sintetizador de cada canción se crea en un hilo aparte (antes en el del juego: tirón en cada
+  cambio de zona); el SoundFont se carga en segundo plano al arrancar. Audio en bloques de 512 muestras
+  (10,7 ms) y prioridad alta para que los efectos vayan a tiempo.
+- **Archivos**: lo que está en reloaded.pak y no suelto en disco se lee directamente del paquete, sin intentar
+  abrir antes el archivo en la tarjeta (las partidas y lo que escribe el juego siguen teniendo prioridad).

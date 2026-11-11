@@ -717,7 +717,13 @@ impl Game {
 
         let mut renderer = Renderer::new((), &connection, &options, &window, settings.clear_colour.into())?;
 
-        let mut atlases = AtlasBuilder::new(renderer.max_texture_size() as _);
+        // con texturas diferidas solo quedan en atlas las fuentes: a 2048 de ancho caben en 2048x512 y se
+        // pueden copiar en cada página de sprites (render/opengl.rs, AtlasMirror)
+        let mut atlases = AtlasBuilder::new(if gm8exe::LAZY_PIXELS.load(std::sync::atomic::Ordering::Relaxed) {
+            (renderer.max_texture_size() as i32).min(2048)
+        } else {
+            renderer.max_texture_size() as _
+        });
 
         let scaling = match settings.scaling {
             0 => Scaling::Full,

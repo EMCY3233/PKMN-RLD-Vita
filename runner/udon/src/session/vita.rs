@@ -6,8 +6,10 @@
 use crate::{error::Error, session, source::{self, ChannelCount, SampleRate, Source}};
 use vitasdk_sys::*;
 
-/// Muestras por canal y bloque (≈21 ms a 48 kHz)
-const GRAIN: usize = 1024;
+/// Muestras por canal y bloque (≈10,7 ms a 48 kHz): poca latencia entre la acción y su sonido
+const GRAIN: usize = 512;
+/// Prioridad más alta de usuario (64); el hilo pasa casi todo el tiempo bloqueado en sceAudioOutOutput
+const PRIORITY: i32 = 64;
 
 pub struct Device;
 pub struct OutputStream;
@@ -41,6 +43,7 @@ impl OutputStream {
     pub fn play(&self, mut source: impl Source + Send + 'static) -> Result<(), Error> {
         unsafe {
             sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), SCE_KERNEL_CPU_MASK_USER_1 as _);
+            sceKernelChangeThreadPriority(sceKernelGetThreadId(), PRIORITY);
         }
         let port = unsafe {
             sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM, GRAIN as _, 48000, SCE_AUDIO_OUT_MODE_STEREO)

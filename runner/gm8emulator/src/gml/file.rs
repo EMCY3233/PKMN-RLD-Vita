@@ -29,6 +29,11 @@ impl Seek for RFile {
 
 /// Abre para lectura: disco primero, paquete después
 fn open_read(path: &str) -> io::Result<RFile> {
+    if pak::packed_only(path) {
+        if let Some(b) = pak::read(path) {
+            return Ok(RFile::Mem(io::Cursor::new(b)))
+        }
+    }
     match File::open(path) {
         Ok(f) => Ok(RFile::Disk(f)),
         Err(e) => pak::read(path).map(|b| RFile::Mem(io::Cursor::new(b))).ok_or(e),
@@ -443,7 +448,8 @@ pub fn skip_line(f: impl Read) -> io::Result<()> {
 }
 
 pub fn file_exists(path: &str) -> bool {
-    Path::new(path).is_file() || pak::exists(path)
+    // primero el paquete (sin tocar la tarjeta), luego el disco
+    pak::exists(path) || Path::new(path).is_file()
 }
 
 pub fn rename(from: &str, to: &str) -> Result<()> {

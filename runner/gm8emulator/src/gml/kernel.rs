@@ -8710,6 +8710,8 @@ impl Game {
     pub fn sprite_add_sprite(&mut self, args: &[Value]) -> gml::Result<Value> {
         let fname = expect_args!(args, [string])?;
         let path = file::to_path(&fname).into_owned();
+        let t0 = std::time::Instant::now();
+        let dbg = std::env::var_os("RLD_DEBUG_SPR").is_some();
         let parsed = (|| -> Option<_> {
             use std::io::Read as _;
             let raw = file::read_any(&path).ok()?;
@@ -8758,6 +8760,7 @@ impl Game {
             return Ok((-1).into())
         }
         let (width, height) = frames[0].dimensions();
+        let t_parse = t0.elapsed();
         let bbox = match bbox_type {
             0 => None,
             1 => Some(asset::sprite::BoundingBox { left: 0, right: width - 1, top: 0, bottom: height - 1 }),
@@ -8793,6 +8796,8 @@ impl Game {
                 c.data = vec![true; (c.width * c.height) as usize].into_boxed_slice();
             }
         }
+        let t_mask = t0.elapsed();
+        let nframes = frames.len();
         let frames = frames
             .into_iter()
             .map(|i| {
@@ -8806,6 +8811,13 @@ impl Game {
                 })
             })
             .collect::<gml::Result<_>>()?;
+        if dbg {
+            eprintln!(
+                "sprite_add_sprite {}: {} fotogramas {}x{} forma {} sepmasks {} | leer {:.1} ms, máscaras {:.1} ms, subir {:.1} ms",
+                fname, nframes, width, height, shape, sepmasks,
+                t_parse.as_secs_f64() * 1e3, (t_mask - t_parse).as_secs_f64() * 1e3, (t0.elapsed() - t_mask).as_secs_f64() * 1e3
+            );
+        }
         let sprite_id = self.assets.sprites.len();
         self.assets.sprites.push(Some(Box::new(asset::Sprite {
             name: format!("__newsprite{}", sprite_id).into(),
@@ -9371,8 +9383,13 @@ impl Game {
 
     pub fn sound_replace(&mut self, args: &[Value]) -> gml::Result<Value> {
         let (sound_id, fname, kind, preload) = expect_args!(args, [int, string, int, bool])?;
+        let t0 = std::time::Instant::now();
+        let dbg = std::env::var_os("RLD_DEBUG_SOUND").is_some();
         if let Some(sound) = self.assets.sounds.get_asset_mut(sound_id) {
             self.audio.stop_sound(sound_id);
+            if dbg {
+                eprintln!("sound_replace {} '{}': stop {:.1} ms", sound_id, fname, t0.elapsed().as_secs_f64() * 1000.0);
+            }
             sound.gml_kind = kind.into();
             sound.gml_preload = f64::from(u8::from(preload)).into();
             // Pokémon Reloaded cambia la música con sound_replace sobre el mismo sonido (52) en cada
@@ -9405,6 +9422,9 @@ impl Game {
                 },
                 _ => return Ok(0.into()),
             };
+            if dbg {
+                eprintln!("sound_replace {}: total {:.1} ms", sound_id, t0.elapsed().as_secs_f64() * 1000.0);
+            }
             Ok(1.into())
         } else {
             Err(gml::Error::FunctionError("sound_replace".into(), "Trying to replace non-existing sound.".into()))

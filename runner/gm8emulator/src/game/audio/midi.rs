@@ -150,8 +150,68 @@ impl MidiHandle {
 
     /// A fresh playback of this file. Every play gets its own sequencer, so the same sound can be
     /// played again while an earlier copy is still going.
-    pub fn source(&self, looping: bool) -> Option<MidiSource> {
-        MidiSource::new(&self.data, looping)
+    pub fn source(&self, looping: bool) -> Option<PendingMidi> {
+        // Crear el sintetizador (voces, secuenciador) cuesta ~10 ms en PC y bastante más en la Vita: se
+        // hace en un hilo aparte para que el cambio de música no congele el juego. Hasta que está listo
+        // la fuente da silencio.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let data = self.data.clone();
+        std::thread::Builder::new()
+            .name("midi-init".into())
+            .spawn(move || {
+                if let Some(src) = MidiSource::new(&data, looping) {
+                    let _ = tx.send(src);
+                }
+            })
+            .ok()?;
+        Some(PendingMidi { rx, inner: None, failed: false })
+    }
+}
+
+/// Carga el SoundFont (6 MB) en segundo plano al arrancar, para que la primera canción no espere
+pub fn preload_soundfont() {
+    let _ = std::thread::Builder::new().name("soundfont".into()).spawn(|| {
+        let _ = shared_soundfont();
+    });
+}
+
+/// Fuente MIDI que se prepara en otro hilo (ver MidiHandle::source)
+pub struct PendingMidi {
+    rx: std::sync::mpsc::Receiver<MidiSource>,
+    inner: Option<MidiSource>,
+    failed: bool,
+}
+
+impl Source for PendingMidi {
+    fn channel_count(&self) -> ChannelCount {
+        ChannelCount::new(CHANNELS).unwrap()
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        SampleRate::new(SAMPLE_RATE).unwrap()
+    }
+
+    fn write_samples(&mut self, buffer: &mut [Sample]) -> usize {
+        if self.inner.is_none() && !self.failed {
+            match self.rx.try_recv() {
+                Ok(src) => self.inner = Some(src),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    buffer.iter_mut().for_each(|x| *x = 0.0);
+                    return buffer.len()
+                },
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.failed = true,
+            }
+        }
+        match self.inner.as_mut() {
+            Some(src) => src.write_samples(buffer),
+            None => 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        if let Some(src) = self.inner.as_mut() {
+            src.reset();
+        }
     }
 }
 

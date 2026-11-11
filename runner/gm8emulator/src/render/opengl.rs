@@ -271,6 +271,22 @@ unsafe fn submit_vertices(gl: &gl::Gl, verts: &[Vertex]) {
     gl.BufferData(gl::ARRAY_BUFFER, (size_of::<Vertex>() * verts.len()) as _, verts.as_ptr().cast(), gl::STREAM_DRAW);
 }
 
+/// Empaquetador para una página diferida: con copia del atlas 0, reserva primero su esquina (0,0)
+fn page_packer(pw: i32, ph: i32, mirror: Option<(i32, i32)>) -> (DensePacker, bool) {
+    let mut p = DensePacker::new(pw, ph);
+    if let Some((mw, mh)) = mirror {
+        if mw <= pw && mh <= ph {
+            if let Some(r) = p.pack(mw, mh, false) {
+                if r.x == 0 && r.y == 0 {
+                    return (p, true)
+                }
+            }
+            p = DensePacker::new(pw, ph);
+        }
+    }
+    (p, false)
+}
+
 #[cfg(target_os = "vita")]
 fn platform_mem_report() -> String {
     vgl::mem_report()
@@ -297,7 +313,19 @@ struct LazyTextures {
     used_bytes: usize,
     loads: u64,
     evictions: u64,
+    /// Copia del atlas 0 (fuentes y píxel blanco de las primitivas) que se pone en la esquina (0,0) de
+    /// cada página: así textos y rectángulos no cortan el lote de los sprites (cada corte, ~0,3 ms en Vita)
+    mirror: Option<AtlasMirror>,
+    /// páginas que llevan la copia del atlas 0
+    mirror_pages: std::collections::HashSet<u32>,
 }
+
+struct AtlasMirror {
+    size: (i32, i32),
+    /// (x, y, ancho, alto, BGRA)
+    pieces: Vec<(i32, i32, i32, i32, Box<[u8]>)>,
+}
+
 
 struct LazyPage {
     atlas_id: u32,
@@ -307,7 +335,12 @@ struct LazyPage {
     last_used: u64,
 }
 
-const LAZY_PAGE: i32 = 1024;
+/// Lado de las páginas de texturas diferidas. 2048: los sprites y fondos de una zona caben en una sola
+/// página y los lotes de dibujo no se cortan por cambiar de textura (cada cambio cuesta ~0,3 ms en la Vita).
+/// RLD_LAZY_PAGE=1024 para comparar.
+fn lazy_page() -> i32 {
+    std::env::var("RLD_LAZY_PAGE").ok().and_then(|v| v.parse().ok()).unwrap_or(2048)
+}
 
 /// Ubicaciones de los uniforms del shader simplificado
 #[derive(Clone, Copy, Default)]
@@ -885,8 +918,8 @@ impl RendererImpl {
         // 2) vaciar la página usada hace más tiempo (si no cabe otra en el presupuesto)
         if found.is_none() {
             let need = {
-                let pw = LAZY_PAGE.max((w as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
-                let ph = LAZY_PAGE.max((h as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
+                let pw = lazy_page().max((w as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
+                let ph = lazy_page().max((h as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
                 (pw, ph)
             };
             if self.lazy.used_bytes + (need.0 * need.1 * 4) as usize > self.lazy.budget_bytes {
@@ -908,7 +941,8 @@ impl RendererImpl {
                         }
                     }
                     page.ids.clear();
-                    page.packer = DensePacker::new(page.size.0, page.size.1);
+                    let keep = self.lazy.mirror_pages.contains(&page.atlas_id);
+                    page.packer = page_packer(page.size.0, page.size.1, self.lazy.mirror.as_ref().map(|m| m.size).filter(|_| keep)).0;
                     self.lazy.evictions += 1;
                     if self.lazy.evictions <= 3 || self.lazy.evictions % 100 == 0 {
                         crate::startlog(&format!(
@@ -942,7 +976,17 @@ impl RendererImpl {
                 self.fbo_ids.resize(self.texture_ids.len(), None);
                 self.zbuf_ids.resize(self.texture_ids.len(), None);
                 self.lazy.used_bytes += (pw * ph * 4) as usize;
-                let mut packer = DensePacker::new(pw, ph);
+                let (mut packer, mirrored) = page_packer(pw, ph, self.lazy.mirror.as_ref().map(|m| m.size));
+                if mirrored {
+                    if let Some(m) = self.lazy.mirror.as_ref() {
+                        unsafe {
+                            for (x, y, mw, mh, px) in &m.pieces {
+                                self.gl.TexSubImage2D(gl::TEXTURE_2D, 0, *x, *y, *mw, *mh, gl::BGRA, gl::UNSIGNED_BYTE, px.as_ptr().cast());
+                            }
+                        }
+                    }
+                    self.lazy.mirror_pages.insert(atlas_id);
+                }
                 let r = packer.pack(w, h, false);
                 self.lazy.pages.push(LazyPage { atlas_id, packer, size: (pw, ph), ids: Vec::new(), last_used: frame });
                 match r {
@@ -1297,8 +1341,17 @@ impl RendererImpl {
         }
     }
 
-    fn setup_queue(&mut self, atlas_id: u32, queue_type: PrimitiveShape) {
+    fn setup_queue(&mut self, mut atlas_id: u32, queue_type: PrimitiveShape) {
         self.update_render_state();
+        // atlas 0 copiado en las páginas: mismas coordenadas, así que se sigue en la misma textura
+        if self.queue_type == queue_type && atlas_id != self.current_atlas && !self.lazy.mirror_pages.is_empty() {
+            if atlas_id == 0 && self.lazy.mirror_pages.contains(&self.current_atlas) {
+                atlas_id = self.current_atlas;
+            } else if self.current_atlas == 0 && self.lazy.mirror_pages.contains(&atlas_id) {
+                // lo que hay en cola del atlas 0 también vale en la página
+                self.current_atlas = atlas_id;
+            }
+        }
         if atlas_id != self.current_atlas || self.queue_type != queue_type {
             self.flush_queue();
             self.current_atlas = atlas_id;
@@ -1324,6 +1377,15 @@ impl RendererImpl {
             }
 
             self.stat_draws += 1;
+            if let Some(from) = std::env::var("RLD_DEBUG_BINDS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n >= from && n < from + 60 {
+                    let page = self.lazy.pages.iter().position(|p| p.atlas_id == atlas_id);
+                    let (w, h) = (0, 0);
+                    eprintln!("lote {} atlas {} ({}x{}) página {:?} vértices {}", n, atlas_id, w, h, page, buffer.len());
+                }
+            }
             if self.stat_last_atlas != atlas_id {
                 self.stat_last_atlas = atlas_id;
                 self.stat_binds += 1;
@@ -1403,11 +1465,31 @@ impl RendererTrait for RendererImpl {
         self.reset_primitive_3d(PrimitiveType::PointList, None);
 
         unsafe {
+            // Con texturas diferidas, los atlas que quedan (fuentes y píxel blanco) se crean del tamaño
+            // ocupado y no del que alcanzó el empaquetador: las fuentes ocupaban 4096x221 en una textura de
+            // 4096x4096 (64 MB de los 112 MB de memoria de vídeo de la Vita).
+            let lazy_mode = sprites.iter().any(|(r, _)| r.atlas_id == crate::render::atlas::LAZY_UNLOADED);
+            let mut used = vec![(1i32, 1i32); packers.len()];
+            for (r, _) in &sprites {
+                if let Some(u) = used.get_mut(r.atlas_id as usize) {
+                    u.0 = u.0.max(r.x as i32 + r.w as i32);
+                    u.1 = u.1.max(r.y as i32 + r.h as i32);
+                }
+            }
             let textures: Vec<GLuint> = {
                 let mut buf = vec![0 as GLuint; packers.len()];
                 self.gl.GenTextures(buf.len() as _, buf.as_mut_ptr());
                 for (i, (tex_id, packer)) in buf.iter().copied().zip(&packers).enumerate() {
-                    let (width, height) = packer.size();
+                    let (width, height) = if lazy_mode {
+                        let (uw, uh) = used[i];
+                        let (pw, ph) = packer.size();
+                        ((uw as u32).next_power_of_two().min(pw as u32) as _, (uh as u32).next_power_of_two().min(ph as u32) as _)
+                    } else {
+                        packer.size()
+                    };
+                    if lazy_mode {
+                        crate::startlog(&format!("Atlas {}: textura {}x{} (empaquetador {}x{})", i, width, height, packer.size().0, packer.size().1));
+                    }
 
                     self.gl.BindTexture(gl::TEXTURE_2D, tex_id);
                     self.current_atlas = i as u32;
@@ -1435,6 +1517,30 @@ impl RendererTrait for RendererImpl {
             match self.gl.GetError() {
                 0 => (),
                 err => return Err(format!("Failed to allocate texture on GPU! (OpenGL code {})", err)),
+            }
+
+            // copia del atlas 0 para las páginas diferidas (solo si hay texturas diferidas)
+            if sprites.iter().any(|(r, _)| r.atlas_id == crate::render::atlas::LAZY_UNLOADED)
+                && std::env::var_os("RLD_NO_MIRROR").is_none()
+            {
+                if let Some(p0) = packers.first() {
+                    let _ = p0;
+                    let size = (
+                        (used[0].0 as u32).next_power_of_two() as i32,
+                        (used[0].1 as u32).next_power_of_two() as i32,
+                    );
+                    let pieces = sprites
+                        .iter()
+                        .filter(|(r, _)| r.atlas_id == 0)
+                        .map(|(r, px)| (r.x as i32, r.y as i32, r.w as i32, r.h as i32, px.clone()))
+                        .collect::<Vec<_>>();
+                    let used = pieces.iter().fold((0, 0), |(mw, mh), (x, y, w, h, _)| (mw.max(x + w), mh.max(y + h)));
+                    crate::startlog(&format!(
+                        "Atlas 0: textura {}x{}, ocupado {}x{} ({} texturas)",
+                        size.0, size.1, used.0, used.1, pieces.len()
+                    ));
+                    self.lazy.mirror = Some(AtlasMirror { size: (size.0 as i32, size.1 as i32), pieces });
+                }
             }
 
             // upload textures
@@ -1618,7 +1724,8 @@ impl RendererTrait for RendererImpl {
                     page.ids.retain(|&x| x != atlas_ref.0);
                     if page.ids.is_empty() {
                         // los huecos de sprites borrados no se recuperan: si la página queda vacía, se reinicia
-                        page.packer = DensePacker::new(page.size.0, page.size.1);
+                        let keep = self.lazy.mirror_pages.contains(&page.atlas_id);
+                        page.packer = page_packer(page.size.0, page.size.1, self.lazy.mirror.as_ref().map(|m| m.size).filter(|_| keep)).0;
                     }
                     self.lazy.page_of[i] = u32::MAX;
                 }
@@ -2369,7 +2476,8 @@ impl RendererTrait for RendererImpl {
                 }
             }
             page.ids.clear();
-            page.packer = DensePacker::new(page.size.0, page.size.1);
+            let keep = self.lazy.mirror_pages.contains(&page.atlas_id);
+            page.packer = page_packer(page.size.0, page.size.1, self.lazy.mirror.as_ref().map(|m| m.size).filter(|_| keep)).0;
         }
         self.lazy.evictions += 1;
     }
