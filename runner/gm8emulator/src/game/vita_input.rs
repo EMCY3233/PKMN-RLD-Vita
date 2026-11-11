@@ -81,6 +81,7 @@ fn vk_name(n: &str) -> Option<u8> {
         "PAGEDOWN" => 0x22,
         "HOME" => 0x24,
         "END" => 0x23,
+        "BACKSLASH" => 220,
         s if s.len() == 1 && s.as_bytes()[0].is_ascii_alphanumeric() => s.as_bytes()[0],
         s if s.starts_with('F') && s[1..].parse::<u8>().map_or(false, |f| (1..=12).contains(&f)) => {
             0x6F + s[1..].parse::<u8>().unwrap()
@@ -93,7 +94,10 @@ struct Keymap {
     base: HashMap<Btn, u8>,
     layer_l: HashMap<Btn, u8>,
     layer_r: HashMap<Btn, u8>,
-    rear: [u8; 4],
+    layer_select: HashMap<Btn, u8>,
+    /// panel trasero: 6 zonas (3 columnas × 2 filas) y las mismas con L mantenido
+    rear: [Option<u8>; 6],
+    rear_l: [Option<u8>; 6],
     /// combinaciones: botones que hay que mantener a la vez → teclas que se pulsan juntas
     combos: Vec<(Vec<Btn>, Vec<u8>)>,
 }
@@ -103,7 +107,9 @@ fn parse(text: &str) -> Keymap {
         base: HashMap::new(),
         layer_l: HashMap::new(),
         layer_r: HashMap::new(),
-        rear: [b'1', b'2', b'3', b'4'],
+        layer_select: HashMap::new(),
+        rear: [Some(b'1'), Some(b'2'), Some(b'3'), Some(b'4'), Some(b'5'), Some(b'6')],
+        rear_l: [Some(b'7'), Some(b'8'), Some(b'9'), Some(b'0'), Some(220), Some(b'L')],
         combos: Vec::new(),
     };
     let mut section = String::new();
@@ -116,11 +122,12 @@ fn parse(text: &str) -> Keymap {
         let Some((k, v)) = line.split_once('=') else { continue };
         let (k, v) = (k.trim().to_ascii_uppercase(), v.trim());
         match section.as_str() {
-            "base" | "capa_l" | "capa_r" => {
+            "base" | "capa_l" | "capa_r" | "capa_select" => {
                 if let (Some(b), Some(vk)) = (btn_name(&k), vk_name(v)) {
                     match section.as_str() {
                         "base" => km.base.insert(b, vk),
                         "capa_l" => km.layer_l.insert(b, vk),
+                        "capa_select" => km.layer_select.insert(b, vk),
                         _ => km.layer_r.insert(b, vk),
                     };
                 }
@@ -135,15 +142,18 @@ fn parse(text: &str) -> Keymap {
                 }
             },
             "tactil" => {
-                let i = match k.as_str() {
-                    "REAR_TL" => 0,
-                    "REAR_TR" => 1,
-                    "REAR_BL" => 2,
-                    "REAR_BR" => 3,
-                    _ => continue,
+                // REAR_1..REAR_6 (arriba izq→der, abajo izq→der) y REAR_L1..REAR_L6 con L mantenido
+                let (l, n) = if let Some(n) = k.strip_prefix("REAR_L") {
+                    (true, n)
+                } else if let Some(n) = k.strip_prefix("REAR_") {
+                    (false, n)
+                } else {
+                    continue
                 };
-                if let Some(vk) = vk_name(v) {
-                    km.rear[i] = vk;
+                let Ok(i) = n.parse::<usize>() else { continue };
+                if (1..=6).contains(&i) {
+                    let vk = if v.eq_ignore_ascii_case("NADA") { None } else { vk_name(v) };
+                    if l { km.rear_l[i - 1] = vk } else { km.rear[i - 1] = vk }
                 }
             },
             _ => (),
@@ -159,6 +169,8 @@ pub struct VitaInput {
     held: HashMap<Btn, u8>,
     layer_used_l: bool,
     layer_used_r: bool,
+    layer_used_select: bool,
+    select_release_in: u32,
     r_frames: u32,
     r_ctrl: bool,
     shift_release_in: u32,
@@ -195,6 +207,8 @@ impl VitaInput {
             held: HashMap::new(),
             layer_used_l: false,
             layer_used_r: false,
+            layer_used_select: false,
+            select_release_in: 0,
             r_frames: 0,
             r_ctrl: false,
             shift_release_in: 0,
@@ -275,6 +289,7 @@ impl VitaInput {
                     }
                     self.layer_used_l = true;
                     self.layer_used_r = true;
+                    self.layer_used_select = true;
                     self.combo = Some(ci);
                     break
                 }
@@ -283,7 +298,7 @@ impl VitaInput {
         let esc = self.combo.is_some();
 
         for (b, mask) in ALL {
-            if b == Btn::L || b == Btn::R {
+            if b == Btn::L || b == Btn::R || b == Btn::Select {
                 continue
             }
             if released & mask != 0 {
@@ -292,7 +307,10 @@ impl VitaInput {
                 }
             }
             if pressed & mask != 0 && !esc {
-                let vk = if down(SCE_CTRL_LTRIGGER) {
+                let vk = if down(SCE_CTRL_SELECT) {
+                    self.layer_used_select = true;
+                    self.km.layer_select.get(&b).copied()
+                } else if down(SCE_CTRL_LTRIGGER) {
                     self.layer_used_l = true;
                     self.km.layer_l.get(&b).copied()
                 } else if down(SCE_CTRL_RTRIGGER) {
@@ -308,6 +326,24 @@ impl VitaInput {
             }
         }
 
+        // SELECT: toque corto sin usar su capa = su tecla (ESPACIO) durante 2 fotogramas
+        if pressed & SCE_CTRL_SELECT != 0 {
+            self.layer_used_select = false;
+        }
+        if released & SCE_CTRL_SELECT != 0 && !self.layer_used_select {
+            if let Some(&vk) = self.km.base.get(&Btn::Select) {
+                out.push(Out::Key(vk, true));
+                self.select_release_in = 2;
+            }
+        }
+        if self.select_release_in > 0 {
+            self.select_release_in -= 1;
+            if self.select_release_in == 0 {
+                if let Some(&vk) = self.km.base.get(&Btn::Select) {
+                    out.push(Out::Key(vk, false));
+                }
+            }
+        }
         // L: toque corto sin usar la capa = SHIFT durante 2 fotogramas
         if pressed & SCE_CTRL_LTRIGGER != 0 {
             self.layer_used_l = false;
@@ -371,15 +407,20 @@ impl VitaInput {
             self.touching = false;
         }
 
-        // panel trasero: cuadrantes = teclas 1-4
+        // panel trasero: 6 zonas (1 2 3 / 4 5 6); con L mantenido, la segunda fila de teclas
         let mut r: SceTouchData = unsafe { std::mem::zeroed() };
         unsafe {
             sceTouchPeek(SCE_TOUCH_PORT_BACK, &mut r, 1);
         }
         let quad = if r.reportNum > 0 {
             let (x, y) = (r.report[0].x as i32, r.report[0].y as i32);
-            let q = (x >= 960) as usize + 2 * (y >= 500) as usize;
-            Some(self.km.rear[q])
+            let zone = (x / 640).clamp(0, 2) as usize + 3 * (y >= 500) as usize;
+            if down(SCE_CTRL_LTRIGGER) {
+                self.layer_used_l = true;
+                self.km.rear_l[zone]
+            } else {
+                self.km.rear[zone]
+            }
         } else {
             None
         };
