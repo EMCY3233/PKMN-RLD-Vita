@@ -61,10 +61,16 @@ pub fn process_image(image: &mut RgbaImage, removeback: bool, smooth: bool, fill
     }
     if removeback {
         // remove background colour
-        let bottom_left = image.get_pixel(0, image.height() - 1).to_rgb();
-        for px in image.pixels_mut() {
-            if px.to_rgb() == bottom_left {
-                px[3] = 0;
+        // GIF con color transparente propio: si ese color es negro, comparar solo el RGB borraría también el
+        // contorno negro (opaco) de los personajes y Pokémon. Como en GM8, la esquina transparente sólo quita
+        // los píxeles que ya eran transparentes; si es opaca, se quita su color.
+        let bl = *image.get_pixel(0, image.height() - 1);
+        let bottom_left = bl.to_rgb();
+        if bl[3] == 255 {
+            for px in image.pixels_mut() {
+                if px.to_rgb() == bottom_left {
+                    px[3] = 0;
+                }
             }
         }
     }

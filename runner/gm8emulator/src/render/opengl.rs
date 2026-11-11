@@ -204,6 +204,9 @@ pub struct RendererImpl {
 
     simple: Option<SimpleUniforms>,
     lazy: LazyTextures,
+    stat_draws: u32,
+    stat_binds: u32,
+    stat_last_atlas: u32,
     /// textura de la barra de teclas en pantalla (cifras 5×7 + bloque blanco), creada al usarla
     overlay_tex: GLuint,
     overlay_tex_size: (i32, i32),
@@ -248,6 +251,15 @@ fn simple_shader_source(src: &str, fragment: bool) -> std::ffi::CString {
 /// primera vez y se colocan en páginas de 1024×1024. Si se supera el presupuesto, se vacía la
 /// página usada hace más tiempo (sus sprites se volverán a cargar si hacen falta).
 #[derive(Default)]
+#[cfg(target_os = "vita")]
+fn platform_mem_report() -> String {
+    vgl::mem_report()
+}
+#[cfg(not(target_os = "vita"))]
+fn platform_mem_report() -> String {
+    String::new()
+}
+
 struct LazyTextures {
     provider: Option<crate::render::LazyProvider>,
     /// AtlasRef → es diferida
@@ -728,6 +740,9 @@ impl RendererImpl {
                 simple: simple_uniforms,
                 overlay_tex: 0,
                 overlay_tex_size: (1, 1),
+                stat_draws: 0,
+                stat_binds: 0,
+                stat_last_atlas: u32::MAX,
                 lazy: LazyTextures {
                     budget_bytes: std::env::var("RLD_TEX_BUDGET_MB")
                         .ok()
@@ -1287,6 +1302,11 @@ impl RendererImpl {
                 err => panic!("OpenGL threw an error somewhere (error code {})", err),
             }
 
+            self.stat_draws += 1;
+            if self.stat_last_atlas != atlas_id {
+                self.stat_last_atlas = atlas_id;
+                self.stat_binds += 1;
+            }
             self.gl.BindTexture(gl::TEXTURE_2D, self.texture_ids[atlas_id as usize].unwrap());
             if let Some(u) = self.simple {
                 let (mut w, mut h) = (0, 0);
@@ -1298,6 +1318,26 @@ impl RendererImpl {
             self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, filter_mode as _);
             self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, filter_mode as _);
 
+            // Vita: vértices desde la memoria del programa (vitaGL los copia a su búfer circular del
+            // fotograma). glBufferData reserva memoria de vídeo en cada llamada (dos por lote) y con la
+            // memoria casi llena se fragmenta: el dibujo se iba haciendo cada vez más lento.
+            #[cfg(target_os = "vita")]
+            {
+                self.gl.BindBuffer(gl::ARRAY_BUFFER, 0);
+                let base = buffer.as_ptr() as *const u8;
+                let st = size_of::<Vertex>() as i32;
+                let attr = |gl: &gl::Gl, i: u32, n: i32, off: usize| {
+                    gl.VertexAttribPointer(i, n, gl::FLOAT, gl::FALSE, st, base.add(off).cast());
+                };
+                attr(&self.gl, 0, 3, offset_of!(Vertex, pos));
+                attr(&self.gl, 1, 4, offset_of!(Vertex, blend));
+                attr(&self.gl, 2, 2, offset_of!(Vertex, tex_coord));
+                attr(&self.gl, 3, 3, offset_of!(Vertex, normal));
+                attr(&self.gl, 4, 4, offset_of!(Vertex, atlas_xywh));
+                self.gl.DrawArrays(shape.into(), 0, buffer.len() as i32);
+                return
+            }
+            #[allow(unreachable_code)]
             self.gl.BufferData(
                 gl::ARRAY_BUFFER,
                 (size_of::<Vertex>() * buffer.len()) as _,
@@ -1563,7 +1603,12 @@ impl RendererTrait for RendererImpl {
                 self.lazy.is_lazy[i] = false;
                 self.lazy.own.remove(&atlas_ref.0);
                 if let Some(p) = self.lazy.page_of.get(i).copied().filter(|&p| p != u32::MAX) {
-                    self.lazy.pages[p as usize].ids.retain(|&x| x != atlas_ref.0);
+                    let page = &mut self.lazy.pages[p as usize];
+                    page.ids.retain(|&x| x != atlas_ref.0);
+                    if page.ids.is_empty() {
+                        // los huecos de sprites borrados no se recuperan: si la página queda vacía, se reinicia
+                        page.packer = DensePacker::new(page.size.0, page.size.1);
+                    }
                     self.lazy.page_of[i] = u32::MAX;
                 }
                 self.texture_rects[i] = None;
@@ -2282,6 +2327,40 @@ impl RendererTrait for RendererImpl {
                 r.origin_y = origin_y as f32 / r.h as f32;
             }
         }
+    }
+
+    fn perf_stats(&mut self) -> String {
+        let (d, b, l, e) = (self.stat_draws, self.stat_binds, self.lazy.loads, self.lazy.evictions);
+        self.stat_draws = 0;
+        self.stat_binds = 0;
+        let own_px: usize = self.lazy.own.values().map(|p| p.len()).sum();
+        let live: usize = self.lazy.pages.iter().map(|p| p.ids.len()).sum();
+        format!(
+            "{} lotes, {} cambios de textura | páginas {} ({} MB, {} texturas vivas) | cargas {} vaciados {} | sprites propios {} ({} MB RAM){}",
+            d, b, self.lazy.pages.len(), self.lazy.used_bytes / 1048576, live, l, e, self.lazy.own.len(), own_px / 1048576,
+            platform_mem_report()
+        )
+    }
+
+    fn compact_textures(&mut self) {
+        // Al cambiar de sala: si las páginas ocupan más de la mitad del presupuesto, se vacían todas y
+        // lo que haga falta se vuelve a cargar al dibujarlo. Así los huecos de sprites borrados y lo de
+        // salas anteriores no obligan a repartir los sprites de la sala en muchas páginas.
+        if self.lazy.pages.is_empty() || self.lazy.used_bytes * 2 <= self.lazy.budget_bytes {
+            return
+        }
+        self.flush_queue();
+        for page in self.lazy.pages.iter_mut() {
+            for &old in &page.ids {
+                self.lazy.page_of[old as usize] = u32::MAX;
+                if let Some(r) = self.texture_rects[old as usize].as_mut() {
+                    r.atlas_id = crate::render::atlas::LAZY_UNLOADED;
+                }
+            }
+            page.ids.clear();
+            page.packer = DensePacker::new(page.size.0, page.size.1);
+        }
+        self.lazy.evictions += 1;
     }
 
     fn set_lazy_provider(&mut self, provider: crate::render::LazyProvider) {

@@ -185,6 +185,7 @@ pub struct VitaInput {
     layer_used_l: bool,
     layer_used_r: bool,
     layer_used_select: bool,
+    skip_lr_tap: u32,
     select_release_in: u32,
     r_frames: u32,
     r_ctrl: bool,
@@ -231,6 +232,7 @@ impl VitaInput {
             layer_used_l: false,
             layer_used_r: false,
             layer_used_select: false,
+            skip_lr_tap: 0,
             select_release_in: 0,
             r_frames: 0,
             r_ctrl: false,
@@ -381,6 +383,23 @@ impl VitaInput {
         }
         let esc = self.combo.is_some();
 
+        // L y R con SELECT mantenido: su tecla de la capa SELECT (L = F1 ayuda, R = Q misiones)
+        for (b, mask) in [(Btn::L, SCE_CTRL_LTRIGGER), (Btn::R, SCE_CTRL_RTRIGGER)] {
+            if released & mask != 0 {
+                if let Some(vk) = self.held.remove(&b) {
+                    out.push(Out::Key(vk, false));
+                }
+            }
+            if pressed & mask != 0 && !esc && down(SCE_CTRL_SELECT) {
+                if let Some(&vk) = self.km.layer_select.get(&b) {
+                    self.layer_used_select = true;
+                    self.held.insert(b, vk);
+                    out.push(Out::Key(vk, true));
+                    self.skip_lr_tap |= mask;
+                }
+            }
+        }
+
         for (b, mask) in ALL {
             if b == Btn::L || b == Btn::R || b == Btn::Select {
                 continue
@@ -430,7 +449,7 @@ impl VitaInput {
         }
         // L: toque corto sin usar la capa = SHIFT durante 2 fotogramas
         if pressed & SCE_CTRL_LTRIGGER != 0 {
-            self.layer_used_l = false;
+            self.layer_used_l = self.skip_lr_tap & SCE_CTRL_LTRIGGER != 0;
         }
         if released & SCE_CTRL_LTRIGGER != 0 && !self.layer_used_l {
             if let Some(&vk) = self.km.base.get(&Btn::L) {
@@ -448,9 +467,10 @@ impl VitaInput {
         }
         // R: mantenido sin usar la capa (más de 8 fotogramas) = CTRL mientras siga pulsado
         if pressed & SCE_CTRL_RTRIGGER != 0 {
-            self.layer_used_r = false;
+            self.layer_used_r = self.skip_lr_tap & SCE_CTRL_RTRIGGER != 0;
             self.r_frames = 0;
         }
+        self.skip_lr_tap = 0;
         if down(SCE_CTRL_RTRIGGER) {
             self.r_frames += 1;
             if !self.r_ctrl && !self.layer_used_r && self.r_frames > 8 {

@@ -1631,6 +1631,7 @@ impl Game {
     }
 
     pub fn load_room(&mut self, room_id: i32) -> Result<(), Box<dyn std::error::Error>> {
+        self.renderer.compact_textures();
         let (room, room_state, is_stored) = if let Some(room) = self.assets.rooms.get_asset(room_id) {
             if let Some(p) = self.stored_rooms.iter().position(|x| x.id == room_id) {
                 (room.clone(), self.stored_rooms.remove(p), true)
@@ -2414,6 +2415,7 @@ impl Game {
                         room,
                         self.room.instance_list.count_all(),
                     ));
+                    crate::startlog(&format!("  dibujo: {}", self.renderer.perf_stats()));
                     perf_t0 = Instant::now();
                     perf_frames = 0;
                     perf_busy = 0;

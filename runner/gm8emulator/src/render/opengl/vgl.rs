@@ -99,6 +99,7 @@ unsafe fn bgra_to_rgba(format: GLenum, ty: GLenum, w: GLsizei, h: GLsizei, data:
 }
 
 extern "C" {
+    fn vglMemFree(t: c_int) -> usize;
     fn vglInitExtended(legacy_pool_size: c_int, width: c_int, height: c_int, ram_threshold: c_int, msaa: c_int) -> u8;
     fn vglGetProcAddress(name: *const c_char) -> *mut c_void;
     fn vglSetSemanticBindingMode(mode: c_int);
@@ -257,6 +258,12 @@ unsafe extern "C" fn shim_get_error() -> GLenum {
         }
     }
     0
+}
+
+/// Memoria libre en los montones de vitaGL (para el registro de rendimiento)
+pub fn mem_report() -> String {
+    let mb = |t| unsafe { vglMemFree(t) } / 1048576;
+    format!(" | vitaGL libre: CDRAM {} MB, RAM {} MB, phycont {} MB", mb(0), mb(1), mb(2))
 }
 
 /// (RAM de usuario, CDRAM, phycont) libres, en bytes

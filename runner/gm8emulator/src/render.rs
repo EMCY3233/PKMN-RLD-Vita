@@ -293,6 +293,14 @@ pub trait RendererTrait {
     /// (y, si conviene, los de texturas hermanas: todos los fotogramas del mismo sprite)
     fn set_lazy_provider(&mut self, _provider: LazyProvider) {}
 
+    /// Estadísticas de dibujo desde la última llamada (para el registro de rendimiento)
+    fn perf_stats(&mut self) -> String {
+        String::new()
+    }
+
+    /// Reorganiza las texturas diferidas al cambiar de sala
+    fn compact_textures(&mut self) {}
+
     /// Cambia el origen (en píxeles) de una textura de sprite. GM8 lo aplica al dibujar; OpenGMK
     /// guardaba el origen solo en el recurso y el dibujo seguía usando el de la carga
     /// (sprite_set_offset no tenía efecto visible).
@@ -692,6 +700,14 @@ impl Renderer {
 
     pub fn set_lazy_provider(&mut self, provider: LazyProvider) {
         self.0.set_lazy_provider(provider)
+    }
+
+    pub fn perf_stats(&mut self) -> String {
+        self.0.perf_stats()
+    }
+
+    pub fn compact_textures(&mut self) {
+        self.0.compact_textures()
     }
 
     pub fn check_texture_id(&self, id: i32) -> bool {
