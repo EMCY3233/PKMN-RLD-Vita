@@ -142,6 +142,33 @@ impl Game {
         }
         b.polls += 1;
         let frame = b.polls;
+        // RLD_KEYS=sondeo:vk:1|0,… y RLD_SHOTS_P=sondeo,…: pulsaciones y capturas en sondeos de
+        // teclado concretos (también dentro de bucles modales); RLD_MANUAL=1: sin pulsaciones
+        // automáticas. Para reproducir casos concretos en PC.
+        if let Ok(list) = std::env::var("RLD_KEYS") {
+            for item in list.split(',') {
+                let p: Vec<&str> = item.split(':').collect();
+                if let [f, vk, d] = p[..] {
+                    if f.trim().parse::<u64>().ok() == Some(frame) {
+                        if let Ok(vk) = vk.trim().parse::<u8>() {
+                            self.pending_keys.push((vk, d.trim() == "1"));
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(list) = std::env::var("RLD_SHOTS_P") {
+            if list.split(',').any(|f| f.trim().parse::<u64>().ok() == Some(frame)) {
+                let (w, h) = (self.unscaled_width, self.unscaled_height);
+                let rgba = self.renderer.get_pixels(0, 0, w as _, h as _);
+                if let Some(img) = image::RgbaImage::from_vec(w, h, rgba.into()) {
+                    let _ = img.save(format!("shotp_{}.png", frame));
+                }
+            }
+        }
+        if std::env::var_os("RLD_MANUAL").is_some() {
+            return
+        }
         let press = |g: &mut Game, vk: u8| g.pending_keys.push((vk, true));
         let release = |g: &mut Game, vk: u8| g.pending_keys.push((vk, false));
         let speed = self.room.speed.max(1) as u64;

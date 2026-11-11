@@ -266,6 +266,11 @@ pub trait RendererTrait {
     /// (y, si conviene, los de texturas hermanas: todos los fotogramas del mismo sprite)
     fn set_lazy_provider(&mut self, _provider: LazyProvider) {}
 
+    /// Cambia el origen (en píxeles) de una textura de sprite. GM8 lo aplica al dibujar; OpenGMK
+    /// guardaba el origen solo en el recurso y el dibujo seguía usando el de la carga
+    /// (sprite_set_offset no tenía efecto visible).
+    fn set_sprite_origin(&mut self, _id: AtlasRef, _origin_x: i32, _origin_y: i32) {}
+
     fn draw_sprite(&mut self, tex: AtlasRef, x: f64, y: f64, xs: f64, ys: f64, ang: f64, col: i32, alpha: f64) {
         if let Some(rect) = self.get_rect(tex) {
             let (w, h) = (rect.w, rect.h);
@@ -652,6 +657,10 @@ impl Renderer {
 
     pub fn delete_sprite(&mut self, atlas_ref: AtlasRef) {
         self.0.delete_sprite(atlas_ref)
+    }
+
+    pub fn set_sprite_origin(&mut self, id: AtlasRef, origin_x: i32, origin_y: i32) {
+        self.0.set_sprite_origin(id, origin_x, origin_y)
     }
 
     pub fn set_lazy_provider(&mut self, provider: LazyProvider) {

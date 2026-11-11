@@ -2224,6 +2224,16 @@ impl RendererTrait for RendererImpl {
             .and_then(|o: &Option<AtlasRect>| o.as_ref())
     }
 
+    fn set_sprite_origin(&mut self, id: AtlasRef, origin_x: i32, origin_y: i32) {
+        self.flush_queue();
+        if let Some(r) = self.get_rect_mut(id) {
+            if r.w > 0 && r.h > 0 {
+                r.origin_x = origin_x as f32 / r.w as f32;
+                r.origin_y = origin_y as f32 / r.h as f32;
+            }
+        }
+    }
+
     fn set_lazy_provider(&mut self, provider: crate::render::LazyProvider) {
         self.lazy.provider = Some(provider);
     }

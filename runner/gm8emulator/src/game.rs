@@ -2187,9 +2187,16 @@ impl Game {
                 let cur = self.decode_str(self.keyboard_string.as_ref()).into_owned();
                 vi.ime = vita_input::Ime::open("Pokémon Reloaded", &cur, 16);
             }
+            if let Some(vk) = vi.ime_release.take() {
+                self.pending_keys.push((vk, false));
+            }
             if let Some(ime) = vi.ime.as_mut() {
                 if let Some(res) = ime.poll() {
                     vi.ime = None;
+                    // el diálogo del juego espera una tecla (switchKeyboardDialog: while(!keyboard_check(vk_anykey)) io_handle()):
+                    // una tecla sin función (F13) para que recoja keyboard_string
+                    self.pending_keys.push((0x7C, true));
+                    vi.ime_release = Some(0x7C);
                     if let Some(text) = res {
                         // como si se hubiera tecleado: Windows-1252, caracteres sin equivalente → '?'
                         let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(&text);
@@ -2200,7 +2207,13 @@ impl Game {
                     }
                 }
             }
+            // Con el teclado abierto el juego suele estar en un bucle que solo lee teclas (sin dibujar):
+            // se vuelve a presentar el último fotograma para que vitaGL dibuje y actualice el diálogo
+            let ime_open = vi.ime.is_some();
             self.vita_input = Some(vi);
+            if ime_open {
+                self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+            }
         }
         for (vk, down) in std::mem::take(&mut self.pending_keys) {
             if down { self.input.button_press(vk, true) } else { self.input.button_release(vk, true) }

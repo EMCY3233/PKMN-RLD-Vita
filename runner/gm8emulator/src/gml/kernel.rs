@@ -8315,6 +8315,11 @@ impl Game {
         if let Some(sprite) = self.assets.sprites.get_asset_mut(sprite) {
             sprite.origin_x = x;
             sprite.origin_y = y;
+            // también en las texturas, que es lo que usa el dibujo (sprites de entrenador centrados
+            // con sprite_set_offset en ImportTrainer salían desplazados)
+            for f in &sprite.frames {
+                self.renderer.set_sprite_origin(f.atlas_ref, x, y);
+            }
         }
         Ok(Default::default())
     }

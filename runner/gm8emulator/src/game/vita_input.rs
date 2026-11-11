@@ -185,6 +185,8 @@ pub struct VitaInput {
     /// SELECT+TRIÁNGULO pulsado: abrir el teclado del sistema
     pub ime_request: bool,
     pub ime: Option<Ime>,
+    /// tecla ficticia que hay que soltar en el siguiente sondeo (tras cerrar el teclado)
+    pub ime_release: Option<u8>,
     /// id del script GetDialogString (se abre el teclado al empezar)
     pub ime_script: Option<usize>,
 }
@@ -222,6 +224,7 @@ impl VitaInput {
             rear_held: None,
             ime_request: false,
             ime: None,
+            ime_release: None,
             ime_script: None,
         }
     }
