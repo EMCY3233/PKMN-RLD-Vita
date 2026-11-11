@@ -41,3 +41,14 @@ panel trasero = teclas 1-4.
 - Audio (de momento sin sonido).
 - `show_image`/`show_info` (ventanas informativas).
 - Presentación: escala entera si cabe al menos x2 (320x180 -> x3); si no (combate 576x324), ajustada a 960x540. Registro de rendimiento cada 5 s en runner.log (FPS, ms de lógica y de dibujo, sala).
+
+## Correcciones (11/11)
+- **Contorno negro transparente**: `sprite_add/replace(..., removeback=1)` sobre GIF cuyo color
+  transparente es negro borraba también el contorno negro opaco (1.736 imágenes: retratos de
+  `data/trainer`, Pokémon de `data/pkmn` y `pkmn_shiny`, huevos, cajas). Ahora, si la esquina inferior
+  izquierda ya es transparente, no se borra nada más. Fondos de combate: sin el problema.
+- **Ralentización progresiva** (dibujo de 12 a 73 ms en la Ruta 1): cada lote hacía dos `glBufferData`
+  (reserva de memoria de vídeo con la CDRAM casi llena). En la Vita los vértices van ahora desde la
+  memoria del programa; las páginas de texturas se reinician al quedar vacías y se compactan al cambiar
+  de sala si ocupan más de la mitad del presupuesto. El runner.log incluye lotes, cambios de textura,
+  páginas y memoria libre de vitaGL cada 5 s.
