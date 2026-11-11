@@ -204,6 +204,8 @@ pub struct RendererImpl {
 
     simple: Option<SimpleUniforms>,
     lazy: LazyTextures,
+    /// textura de la barra de teclas en pantalla (cifras 5×7 + bloque blanco), creada al usarla
+    overlay_tex: GLuint,
     loc_gm81_normalize: GLint, // uniform bool gm81_normalize
     loc_tex: GLint,            // uniform sampler2D tex
     buf_state: GLuint,         // uniform RenderState state
@@ -723,6 +725,7 @@ impl RendererImpl {
                 primitive_3d: PrimitiveBuilder::new(Default::default(), PrimitiveType::PointList, false),
 
                 simple: simple_uniforms,
+                overlay_tex: 0,
                 lazy: LazyTextures {
                     budget_bytes: std::env::var("RLD_TEX_BUDGET_MB")
                         .ok()
@@ -937,6 +940,99 @@ impl RendererImpl {
         }
     }
 
+    /// Dibuja la barra de teclas en pantalla (1-9, 0, \, L) sobre la imagen del juego
+    unsafe fn draw_overlay(&mut self, u: SimpleUniforms, win_w: i32, win_h: i32) {
+        // cifras 5×7 (filas de arriba abajo, bit 4 = columna izquierda)
+        const GLYPHS: [[u8; 7]; 12] = [
+            [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E], // 1
+            [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F], // 2
+            [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E], // 3
+            [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02], // 4
+            [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E], // 5
+            [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E], // 6
+            [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08], // 7
+            [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E], // 8
+            [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C], // 9
+            [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E], // 0
+            [0x10, 0x10, 0x08, 0x04, 0x02, 0x01, 0x01], // \
+            [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F], // L
+        ];
+        const TW: i32 = 128;
+        const TH: i32 = 8;
+        if self.overlay_tex == 0 {
+            // 13 celdas de 8×8: 12 cifras y un bloque blanco (fondos)
+            let mut px = vec![0u8; (TW * TH * 4) as usize];
+            for (g, rows) in GLYPHS.iter().enumerate() {
+                for (y, row) in rows.iter().enumerate() {
+                    for x in 0..5 {
+                        if row & (0x10 >> x) != 0 {
+                            let i = ((y as i32 * TW + g as i32 * 8 + x) * 4) as usize;
+                            px[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+                        }
+                    }
+                }
+            }
+            for y in 0..8 {
+                for x in 0..8 {
+                    let i = ((y * TW + 12 * 8 + x) * 4) as usize;
+                    px[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+            self.gl.GenTextures(1, &mut self.overlay_tex);
+            self.gl.BindTexture(gl::TEXTURE_2D, self.overlay_tex);
+            self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as _);
+            self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as _);
+            self.gl.TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA as _, TW, TH, 0, gl::RGBA, gl::UNSIGNED_BYTE, px.as_ptr().cast());
+        }
+        self.gl.BindTexture(gl::TEXTURE_2D, self.overlay_tex);
+        self.gl.Uniform2f(u.tex_size, TW as f32, TH as f32);
+        self.gl.Uniform1f(u.colour_blending, 1.0);
+        self.gl.Enable(gl::BLEND);
+        self.gl.BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+        let (ww, wh) = (win_w as f32, win_h as f32);
+        let to_clip = |x: i32, y: i32| (x as f32 / ww * 2.0 - 1.0, 1.0 - y as f32 / wh * 2.0);
+        let mut verts: Vec<Vertex> = Vec::with_capacity(12 * 12);
+        let mut rect = |x: i32, y: i32, w: i32, h: i32, cell: i32, cw: f32, ch: f32, col: [f32; 4]| {
+            let (x1, y1) = to_clip(x, y);
+            let (x2, y2) = to_clip(x + w, y + h);
+            let v = |px: f32, py: f32, tx: f32, ty: f32| Vertex {
+                pos: [px, py, 0.0],
+                tex_coord: [tx, ty],
+                blend: col,
+                atlas_xywh: [(cell * 8) as f32, 0.0, cw, ch],
+                normal: [0.0; 3],
+            };
+            // la fila 0 de la textura va arriba
+            verts.extend_from_slice(&[
+                v(x1, y1, 0.0, 0.0),
+                v(x2, y1, 1.0, 0.0),
+                v(x1, y2, 0.0, 1.0),
+                v(x2, y1, 1.0, 0.0),
+                v(x2, y2, 1.0, 1.0),
+                v(x1, y2, 0.0, 1.0),
+            ]);
+        };
+        let (x0, y0, bw, bh, gap) = crate::render::OVERLAY_GEOM;
+        let pressed = crate::render::OVERLAY_PRESSED.load(std::sync::atomic::Ordering::Relaxed);
+        for i in 0..12 {
+            let x = x0 + i * (bw + gap);
+            let bg = if i == pressed { [0.95, 0.75, 0.2, 0.85] } else { [0.08, 0.1, 0.18, 0.5] };
+            rect(x, y0, bw, bh, 12, 8.0, 8.0, bg);
+            // cifra 5×7 a ×4 = 20×28, centrada
+            rect(x + (bw - 20) / 2, y0 + (bh - 28) / 2, 20, 28, i, 5.0, 7.0, [1.0, 1.0, 1.0, 0.95]);
+        }
+        self.gl.BufferData(
+            gl::ARRAY_BUFFER,
+            (size_of::<Vertex>() * verts.len()) as _,
+            verts.as_ptr().cast(),
+            gl::STREAM_DRAW,
+        );
+        self.gl.DrawArrays(gl::TRIANGLES, 0, verts.len() as i32);
+        self.gl.Disable(gl::BLEND);
+        let (src, dst) = self.queue_render_state.blend_mode;
+        self.gl.BlendFunc(src.into(), dst.into());
+    }
+
     /// Presenta el búfer del juego en pantalla con escalado entero (o ajustado si no cabe ni a ×1)
     unsafe fn present_quad(&mut self, win_w: i32, win_h: i32, fb_w: i32, fb_h: i32) {
         let Some(u) = self.simple else { return };
@@ -994,6 +1090,10 @@ impl RendererImpl {
         ];
         self.gl.BufferData(gl::ARRAY_BUFFER, (size_of::<Vertex>() * 6) as _, quad.as_ptr().cast(), gl::STREAM_DRAW);
         self.gl.DrawArrays(gl::TRIANGLES, 0, 6);
+        if crate::render::OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
+            self.gl.Viewport(0, 0, win_w, win_h);
+            self.draw_overlay(u, win_w, win_h);
+        }
         // restaurar el estado del juego
         if self.queue_render_state.alpha_blending {
             self.gl.Enable(gl::BLEND);

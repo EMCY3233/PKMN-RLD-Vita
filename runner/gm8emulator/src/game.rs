@@ -1583,7 +1583,7 @@ impl Game {
         if self.unscaled_width != width || self.unscaled_height != height {
             self.unscaled_width = width;
             self.unscaled_height = height;
-            if !cfg!(all(target_os = "vita", feature = "vitagl")) {
+            if !cfg!(all(target_os = "vita", feature = "vitagl")) && std::env::var_os("RLD_FAKE_VITA").is_none() {
                 self.window_inner_size = (width, height);
             }
             self.renderer.resize_framebuffer(width, height, false);
@@ -1593,9 +1593,14 @@ impl Game {
             };
             if self.play_type != PlayType::Record {
                 // En la Vita la "ventana" es siempre la pantalla entera; el renderizador escala
-                self.window_inner_size =
-                    if cfg!(all(target_os = "vita", feature = "vitagl")) { (960, 544) } else { (width, height) };
-                self.window.set_size((width as _, height as _));
+                // RLD_FAKE_VITA=1 (PC): misma ventana de 960×544 que la Vita, para probar la presentación
+                let vita_like = cfg!(all(target_os = "vita", feature = "vitagl")) || std::env::var_os("RLD_FAKE_VITA").is_some();
+                self.window_inner_size = if vita_like { (960, 544) } else { (width, height) };
+                if vita_like {
+                    self.window.set_size((960, 544));
+                } else {
+                    self.window.set_size((width as _, height as _));
+                }
             }
         }
     }

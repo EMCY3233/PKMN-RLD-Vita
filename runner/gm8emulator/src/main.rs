@@ -86,6 +86,9 @@ fn main() {
     #[cfg(not(any(feature = "desktop", feature = "vitagl")))]
     gm8exe::SKIP_PIXELS.store(true, std::sync::atomic::Ordering::Relaxed);
     // Con gráficos en Vita (o RLD_LAZY_TEX=1 en PC): texturas bajo demanda en vez de todas en memoria
+    if std::env::var_os("RLD_OVERLAY").is_some() {
+        render::OVERLAY_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if cfg!(feature = "vitagl") || std::env::var_os("RLD_LAZY_TEX").is_some() {
         gm8exe::SKIP_PIXELS.store(true, std::sync::atomic::Ordering::Relaxed);
         gm8exe::LAZY_PIXELS.store(true, std::sync::atomic::Ordering::Relaxed);

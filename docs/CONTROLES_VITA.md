@@ -18,8 +18,10 @@ Combinaciones (L+R+…): △ = CTRL+P (desbloquear todos los personajes en la se
 ✕ = F2 reiniciar, ○ = F10 sonido, □ = F9 captura, START = F3 código, ↑ = F7 escala, ↓ = 0 comandos.
 SELECT+L = F1 ayuda, SELECT+R = Q misiones.
 
-Panel trasero: 6 zonas, arriba 1 2 3 / abajo 4 5 6 (Pokémon 1-6 en combate, MO 5 y 6);
-con L mantenido: 7 (Buceo), 8 (habilidades externas), 9 (Xpod), 0, \ (ver Pokémon), L (áreas).
+Barra de teclas en pantalla (arriba, se muestra/oculta con **L+R+SELECT**): 1 2 3 4 5 6 7 8 9 0 \ L
+(Pokémon 1-6 en combate, MO 5/6/7, 8 habilidades externas, 9 Xpod, 0 comandos, \ ver Pokémon,
+L áreas). Sustituye al panel trasero, que queda desactivado por defecto para evitar roces
+(se puede activar en `keymap.ini`).
 
 Pantalla táctil = ratón en coordenadas del juego: tocar = clic, mantener y arrastrar = arrastrar
 (puzle Unown, botones de póker y tragaperras, decoración).

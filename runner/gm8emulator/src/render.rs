@@ -6,6 +6,24 @@ pub const UNTEXTURED: f32 = -100000.0;
 
 /// Último rectángulo de pantalla donde se presentó el juego: [x, y, ancho, alto, ancho_juego, alto_juego]
 /// (para convertir toques de la pantalla táctil en coordenadas del juego)
+/// Barra de teclas en pantalla (PS Vita): visible, y botón pulsado (-1 = ninguno)
+pub static OVERLAY_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static OVERLAY_PRESSED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+/// Teclas de la barra, de izquierda a derecha (código de tecla virtual de Windows)
+pub const OVERLAY_KEYS: [u8; 12] = [b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', 220, b'L'];
+/// Geometría de la barra en la pantalla de 960×544: (x0, y0, ancho, alto, separación)
+pub const OVERLAY_GEOM: (i32, i32, i32, i32, i32) = (98, 4, 60, 40, 4); // arriba: los diálogos y menús de combate van abajo
+
+/// Botón de la barra bajo un punto de la pantalla (960×544)
+pub fn overlay_hit(x: i32, y: i32) -> Option<usize> {
+    let (x0, y0, w, h, gap) = OVERLAY_GEOM;
+    if y < y0 || y >= y0 + h || x < x0 {
+        return None
+    }
+    let i = ((x - x0) / (w + gap)) as usize;
+    if i < OVERLAY_KEYS.len() && (x - x0) % (w + gap) < w { Some(i) } else { None }
+}
+
 pub static PRESENT_RECT: std::sync::Mutex<[i32; 6]> = std::sync::Mutex::new([0, 0, 0, 0, 0, 0]);
 
 pub type LazyProvider = Box<dyn FnMut(AtlasRef) -> Vec<(AtlasRef, Box<[u8]>)>>;

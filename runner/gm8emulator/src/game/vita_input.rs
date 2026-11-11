@@ -108,8 +108,9 @@ fn parse(text: &str) -> Keymap {
         layer_l: HashMap::new(),
         layer_r: HashMap::new(),
         layer_select: HashMap::new(),
-        rear: [Some(b'1'), Some(b'2'), Some(b'3'), Some(b'4'), Some(b'5'), Some(b'6')],
-        rear_l: [Some(b'7'), Some(b'8'), Some(b'9'), Some(b'0'), Some(220), Some(b'L')],
+        // panel trasero desactivado por defecto (roces accidentales); las cifras van en la barra en pantalla
+        rear: [None; 6],
+        rear_l: [None; 6],
         combos: Vec::new(),
     };
     let mut section = String::new();
@@ -178,6 +179,8 @@ pub struct VitaInput {
     /// combinación activa (índice) y si ya se soltó alguno de sus botones
     combo: Option<usize>,
     touching: bool,
+    /// toque actual sobre la barra de teclas: tecla pulsada
+    overlay_key: Option<u8>,
     rear_held: Option<u8>,
     /// SELECT+TRIÁNGULO pulsado: abrir el teclado del sistema
     pub ime_request: bool,
@@ -215,6 +218,7 @@ impl VitaInput {
             stick: [false; 4],
             combo: None,
             touching: false,
+            overlay_key: None,
             rear_held: None,
             ime_request: false,
             ime: None,
@@ -250,6 +254,17 @@ impl VitaInput {
 
         // con el teclado del sistema abierto, los botones son suyos
         if self.ime.is_some() {
+            self.prev_buttons = buttons;
+            return out
+        }
+        // L+R+SELECT = mostrar/ocultar la barra de teclas en pantalla (1-9, 0, \, L)
+        if down(SCE_CTRL_LTRIGGER) && down(SCE_CTRL_RTRIGGER) && pressed & SCE_CTRL_SELECT != 0 {
+            use std::sync::atomic::Ordering::Relaxed;
+            let v = !crate::render::OVERLAY_VISIBLE.load(Relaxed);
+            crate::render::OVERLAY_VISIBLE.store(v, Relaxed);
+            self.layer_used_l = true;
+            self.layer_used_r = true;
+            self.layer_used_select = true;
             self.prev_buttons = buttons;
             return out
         }
@@ -388,7 +403,22 @@ impl VitaInput {
         unsafe {
             sceTouchPeek(SCE_TOUCH_PORT_FRONT, &mut t, 1);
         }
-        if t.reportNum > 0 {
+        let overlay_on = crate::render::OVERLAY_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
+        if t.reportNum > 0 && (self.overlay_key.is_some() || (!self.touching && overlay_on && {
+            let (sx, sy) = (t.report[0].x as i32 * 960 / 1920, t.report[0].y as i32 * 544 / 1088);
+            crate::render::overlay_hit(sx, sy).is_some()
+        })) {
+            // toque sobre la barra de teclas: tecla, no ratón (se mantiene hasta levantar el dedo)
+            if self.overlay_key.is_none() {
+                let (sx, sy) = (t.report[0].x as i32 * 960 / 1920, t.report[0].y as i32 * 544 / 1088);
+                if let Some(i) = crate::render::overlay_hit(sx, sy) {
+                    let vk = crate::render::OVERLAY_KEYS[i];
+                    out.push(Out::Key(vk, true));
+                    self.overlay_key = Some(vk);
+                    crate::render::OVERLAY_PRESSED.store(i as i32, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        } else if t.reportNum > 0 {
             // pantalla (1920×1088 en el panel) → píxeles del juego según dónde se dibujó la imagen
             let (sx, sy) = (t.report[0].x as i32 * win.0 as i32 / 1920, t.report[0].y as i32 * win.1 as i32 / 1088);
             let r = crate::render::PRESENT_RECT.lock().map(|r| *r).unwrap_or_default();
@@ -405,6 +435,12 @@ impl VitaInput {
         } else if self.touching {
             out.push(Out::MouseButton(false));
             self.touching = false;
+        }
+        if t.reportNum == 0 {
+            if let Some(vk) = self.overlay_key.take() {
+                out.push(Out::Key(vk, false));
+                crate::render::OVERLAY_PRESSED.store(-1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
 
         // panel trasero: 6 zonas (1 2 3 / 4 5 6); con L mantenido, la segunda fila de teclas
