@@ -6099,6 +6099,27 @@ impl Game {
         Ok(gml::TRUE.into())
     }
 
+    /// rld_map_bytes(texto, script): bucle de decodificación carácter a carácter hecho de una vez (game::accel)
+    pub fn rld_map_bytes(args: &[Value]) -> gml::Result<Value> {
+        let (_, id) = expect_args!(args, [any, int])?;
+        let Value::Str(text) = &args[0] else {
+            return Err(gml::Error::FunctionError("rld_map_bytes".into(), "se esperaba texto".into()))
+        };
+        match crate::game::accel::map_bytes(text.as_ref(), id as usize) {
+            Some(b) => Ok(gml::String::from(b).into()),
+            None => Err(gml::Error::FunctionError("rld_map_bytes".into(), "tabla no registrada".into())),
+        }
+    }
+
+    /// rld_special_chars(texto): las sustituciones de SpecialChars en el mismo orden (game::accel)
+    pub fn rld_special_chars(args: &[Value]) -> gml::Result<Value> {
+        let _ = expect_args!(args, [any])?;
+        let Value::Str(text) = &args[0] else {
+            return Err(gml::Error::FunctionError("rld_special_chars".into(), "se esperaba texto".into()))
+        };
+        Ok(gml::String::from(crate::game::accel::special_chars(text.as_ref())).into())
+    }
+
     pub fn rld_lookup(args: &[Value]) -> gml::Result<Value> {
         let (table, key) = expect_args!(args, [int, real])?;
         Ok(match crate::game::accel::lookup(table as usize, key.into()) {

@@ -36,6 +36,19 @@ pub fn rewrite_script(scripts: &[Option<Box<Script>>], id: usize, src: gml::Stri
     if !enabled() {
         return src
     }
+    let src = match rewrite_byte_loops(scripts, src.as_ref()) {
+        Some((new, n)) => {
+            if let Some(Some(s)) = scripts.get(id) {
+                crate::startlog(&format!(
+                    "Acelerador: {} -> {} bucle(s) de decodificación nativos (rld_map_bytes)",
+                    String::from_utf8_lossy(s.name.as_ref()),
+                    n
+                ));
+            }
+            gml::String::from(new)
+        },
+        None => src,
+    };
     let Some(Some(script)) = scripts.get(id) else { return src };
     let src = match rewrite_lookup_chains(src.as_ref()) {
         Some((new, n)) => {
@@ -58,6 +71,18 @@ pub fn rewrite_script(scripts: &[Option<Box<Script>>], id: usize, src: gml::Stri
                 crate::startlog("Acelerador: TextReader ha cambiado en esta versión del juego, se usa el original");
                 src
             },
+        },
+        b"SpecialChars" => match special_chars_pairs(src.as_ref()) {
+            Some(pairs) => {
+                crate::startlog(&format!("Acelerador: SpecialChars -> rld_special_chars ({} sustituciones)", pairs.len()));
+                if let Ok(mut p) = SPECIAL_PAIRS.lock() {
+                    *p = pairs;
+                }
+                let text = latin1(src.as_ref());
+                let new = text.replacen("txt=argument0; ", "txt=argument0; if(is_string(txt))return rld_special_chars(txt); ", 1);
+                gml::String::from(unlatin1(&new))
+            },
+            None => src,
         },
         b"InstanceInView" if trim(src.as_ref()) == INVIEW_ORIGINAL => {
             crate::startlog("Acelerador: InstanceInView -> rld_in_view");
@@ -938,4 +963,145 @@ impl crate::game::Game {
         }
         Ok(acc)
     }
+}
+
+
+// ===== Textos: decodificación byte a byte y caracteres especiales =====
+
+/// Bytes de la fuente (Windows-1252) como texto Latin-1, para usar expresiones regulares sin perder nada
+fn latin1(b: &[u8]) -> String {
+    b.iter().map(|&c| c as char).collect()
+}
+
+fn unlatin1(s: &str) -> Vec<u8> {
+    s.chars().map(|c| c as u32 as u8).collect()
+}
+
+/// Tablas de 256 entradas de las scripts que son un "if(argument0=N)return(M); ... return argument0;"
+static BYTE_MAPS: std::sync::Mutex<Vec<(usize, [u8; 256])>> = std::sync::Mutex::new(Vec::new());
+
+/// Si la script es exactamente una cadena de `if(argument0=N)return(M);` con M entre 0 y 255 que acaba en
+/// `return argument0;`, su tabla para los bytes 0..255 (lo que haría con ord() de un carácter)
+fn byte_map_of(src: &[u8]) -> Option<[u8; 256]> {
+    let t = latin1(trim(src));
+    let body = t.strip_suffix("return argument0;")?;
+    let re = regex_lite::Regex::new(r"^if\(argument0=(\d+)\)return\((\d+)\);$").ok()?;
+    let mut map = [0u8; 256];
+    for (i, m) in map.iter_mut().enumerate() {
+        *m = i as u8;
+    }
+    let mut seen = [false; 256];
+    for part in body.split_inclusive(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let c = re.captures(part)?;
+        let n: u32 = c[1].parse().ok()?;
+        let v: u32 = c[2].parse().ok()?;
+        if v > 255 {
+            return None
+        }
+        if n < 256 && !seen[n as usize] {
+            seen[n as usize] = true; // la primera comparación que coincide es la que devuelve
+            map[n as usize] = v as u8;
+        }
+    }
+    Some(map)
+}
+
+/// `A=""; for(J=1;J<=string_length(T);J+=1){ A+=chr(ex(N,ord(string_char_at(T,J)))); }` con N una tabla de
+/// bytes -> `A=rld_map_bytes(T,N); J=string_length(T)+1;` (mismo resultado y J acaba igual que tras el bucle)
+fn rewrite_byte_loops(scripts: &[Option<Box<Script>>], src: &[u8]) -> Option<(Vec<u8>, usize)> {
+    if !src.windows(18).any(|w| w == b"+=chr(ex(") && !src.windows(9).any(|w| w == b"+=chr(ex(") {
+        return None
+    }
+    let text = latin1(src);
+    let re = regex_lite::Regex::new(
+        r#"(\w+)="";\s*for\((\w+)=1;(\w+)<=string_length\((\w+)\);(\w+)\+=1\)\{\s*(\w+)\+=chr\(ex\((\d+),ord\(string_char_at\((\w+),(\w+)\)\)\)\);\s*\}"#,
+    )
+    .ok()?;
+    let mut n = 0;
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for c in re.captures_iter(&text) {
+        let (a, j, t) = (&c[1], &c[2], &c[4]);
+        let ok = &c[3] == j && &c[5] == j && &c[9] == j && &c[6] == a && &c[8] == t && a != t && a != j && t != j;
+        let id: usize = c[7].parse().unwrap_or(usize::MAX);
+        let map = if ok { scripts.get(id).and_then(|s| s.as_ref()).and_then(|s| byte_map_of(s.source.as_ref())) } else { None };
+        let Some(map) = map else { continue };
+        if let Ok(mut m) = BYTE_MAPS.lock() {
+            if !m.iter().any(|(i, _)| *i == id) {
+                m.push((id, map));
+            }
+        }
+        let whole = c.get(0).unwrap();
+        out.push_str(&text[last..whole.start()]);
+        out.push_str(&format!("{a}=rld_map_bytes({t},{id}); {j}=string_length({t})+1;"));
+        last = whole.end();
+        n += 1;
+    }
+    if n == 0 {
+        return None
+    }
+    out.push_str(&text[last..]);
+    Some((unlatin1(&out), n))
+}
+
+/// rld_map_bytes(texto, script): cada byte del texto pasado por la tabla de esa script
+pub fn map_bytes(text: &[u8], id: usize) -> Option<Vec<u8>> {
+    let m = BYTE_MAPS.lock().ok()?;
+    let (_, map) = m.iter().find(|(i, _)| *i == id)?;
+    Some(text.iter().map(|&b| map[b as usize]).collect())
+}
+
+/// Sustituciones de SpecialChars, en orden
+static SPECIAL_PAIRS: std::sync::Mutex<Vec<(Vec<u8>, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+
+/// SpecialChars: `var txt; txt=argument0; txt=string_replace_all(txt,"A","B"); ... return txt;`
+fn special_chars_pairs(src: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    let t = latin1(trim(src));
+    let body = t.strip_prefix("var txt; txt=argument0; ")?.strip_suffix("return txt;")?;
+    let re = regex_lite::Regex::new(r#"^txt=string_replace_all\(txt,"([^"]*)","([^"]*)"\);$"#).ok()?;
+    let mut pairs = Vec::new();
+    for part in body.split_inclusive("); ").map(str::trim).filter(|p| !p.is_empty()) {
+        let c = re.captures(part)?;
+        if c[1].is_empty() {
+            return None
+        }
+        pairs.push((unlatin1(&c[1]), unlatin1(&c[2])));
+    }
+    // rld_special_chars se salta los textos sin '&': solo es correcto si todas las marcas lo llevan delante
+    if pairs.iter().any(|(a, _)| a.first() != Some(&b'&')) {
+        return None
+    }
+    (!pairs.is_empty()).then_some(pairs)
+}
+
+/// string_replace_all de GM8: de izquierda a derecha, sin solapes
+fn replace_all(s: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i..].starts_with(from) {
+            out.extend_from_slice(to);
+            i += from.len();
+        } else {
+            out.push(s[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+pub fn special_chars(text: &[u8]) -> Vec<u8> {
+    let mut t = text.to_vec();
+    // todas las marcas empiezan por '&': sin '&' no hay nada que sustituir
+    if !t.contains(&b'&') {
+        return t
+    }
+    if let Ok(pairs) = SPECIAL_PAIRS.lock() {
+        for (a, b) in pairs.iter() {
+            if t.windows(a.len()).any(|w| w == a.as_slice()) {
+                t = replace_all(&t, a, b);
+            }
+        }
+    }
+    t
 }
