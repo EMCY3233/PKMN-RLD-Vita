@@ -11,7 +11,7 @@ where
     to: u32,
     dest_rate: SampleRate, // Actual output rate - different from `to` because that is scaled down by GCD
     left_offset: usize,
-    kaiser_values: Box<[Box<[f32]>]>,
+    kaiser_values: std::sync::Arc<[Box<[f32]>]>,
     filter_1: Box<[Sample]>,
     filter_2: Box<[Sample]>,
 
@@ -108,11 +108,25 @@ impl<S: Source> Resampler<S> {
         let left_offset = kaiser_value_count / 2;
 
         let step = to as usize;
-        let kaiser_values: Box<[Box<[f32]>]> = (0..step).map(|start_val| {
-            (start_val..kaiser_value_count).step_by(step).rev().map(|i| {
-                sinc_filter(left_offset as _, downscale_factor, cutoff, i as _) as f32
-            }).collect::<Vec<_>>().into_boxed_slice()
-        }).collect::<Vec<_>>().into_boxed_slice();
+        // La tabla del filtro solo depende de las dos frecuencias, pero calcularla (miles de coeficientes
+        // con funciones de Bessel en f64; 25.000 de 22050 a 48000 Hz) costaba en cada sonido que empezaba,
+        // en el hilo del juego. Se calcula una vez por par de frecuencias y se comparte.
+        static CACHE: std::sync::Mutex<Vec<((u32, u32), std::sync::Arc<[Box<[f32]>]>)>> = std::sync::Mutex::new(Vec::new());
+        let cached = CACHE.lock().ok().and_then(|c| c.iter().find(|(k, _)| *k == (from, to)).map(|(_, v)| v.clone()));
+        let kaiser_values: std::sync::Arc<[Box<[f32]>]> = match cached {
+            Some(v) => v,
+            None => {
+                let v: std::sync::Arc<[Box<[f32]>]> = (0..step).map(|start_val| {
+                    (start_val..kaiser_value_count).step_by(step).rev().map(|i| {
+                        sinc_filter(left_offset as _, downscale_factor, cutoff, i as _) as f32
+                    }).collect::<Vec<_>>().into_boxed_slice()
+                }).collect::<Vec<_>>().into();
+                if let Ok(mut c) = CACHE.lock() {
+                    c.push(((from, to), v.clone()));
+                }
+                v
+            },
+        };
 
         let filter_samples = ((kaiser_value_count + to as usize) / to as usize) * usize::from(source.channel_count().get());
         let mut filter_1 = Vec::with_capacity(filter_samples);
