@@ -149,6 +149,11 @@ pub struct VitaInput {
     escape: bool,
     touching: bool,
     rear_held: Option<u8>,
+    /// SELECT+TRIÁNGULO pulsado: abrir el teclado del sistema
+    pub ime_request: bool,
+    pub ime: Option<Ime>,
+    /// id del script GetDialogString (se abre el teclado al empezar)
+    pub ime_script: Option<usize>,
 }
 
 /// Evento para el juego
@@ -179,6 +184,9 @@ impl VitaInput {
             escape: false,
             touching: false,
             rear_held: None,
+            ime_request: false,
+            ime: None,
+            ime_script: None,
         }
     }
 
@@ -208,6 +216,17 @@ impl VitaInput {
         let released = !buttons & self.prev_buttons;
         let down = |m: u32| buttons & m != 0;
 
+        // con el teclado del sistema abierto, los botones son suyos
+        if self.ime.is_some() {
+            self.prev_buttons = buttons;
+            return out
+        }
+        // SELECT+TRIÁNGULO = teclado del sistema
+        if down(SCE_CTRL_SELECT) && pressed & SCE_CTRL_TRIANGLE != 0 {
+            self.ime_request = true;
+            self.prev_buttons = buttons;
+            return out
+        }
         // SELECT+START = ESCAPE
         let esc = down(SCE_CTRL_SELECT) && down(SCE_CTRL_START);
         if esc != self.escape {
@@ -286,8 +305,15 @@ impl VitaInput {
             sceTouchPeek(SCE_TOUCH_PORT_FRONT, &mut t, 1);
         }
         if t.reportNum > 0 {
-            let (x, y) = (t.report[0].x as i32, t.report[0].y as i32);
-            out.push(Out::MouseMove(x * win.0 as i32 / 1920, y * win.1 as i32 / 1088));
+            // pantalla (1920×1088 en el panel) → píxeles del juego según dónde se dibujó la imagen
+            let (sx, sy) = (t.report[0].x as i32 * win.0 as i32 / 1920, t.report[0].y as i32 * win.1 as i32 / 1088);
+            let r = crate::render::PRESENT_RECT.lock().map(|r| *r).unwrap_or_default();
+            let (gx, gy) = if r[2] > 0 && r[3] > 0 {
+                (((sx - r[0]) * r[4] / r[2]).clamp(0, r[4] - 1), ((sy - r[1]) * r[5] / r[3]).clamp(0, r[5] - 1))
+            } else {
+                (sx, sy)
+            };
+            out.push(Out::MouseMove(gx, gy));
             if !self.touching {
                 out.push(Out::MouseButton(true));
                 self.touching = true;
@@ -319,5 +345,71 @@ impl VitaInput {
             self.rear_held = quad;
         }
         out
+    }
+}
+
+// ===== Teclado del sistema (IME) =====
+//
+// Se abre solo cuando el juego pide escribir un texto (script GetDialogString: nombre del
+// personaje, apodos…) o con SELECT+TRIÁNGULO. Lo escrito sustituye a keyboard_string, igual que
+// si se hubiera tecleado en un PC; el teclado en pantalla del juego sigue funcionando con la cruceta.
+
+/// true mientras el teclado está en pantalla (vitaGL debe dibujar los diálogos del sistema)
+pub static IME_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub struct Ime {
+    title: Vec<u16>,
+    initial: Vec<u16>,
+    buffer: Vec<u16>,
+}
+
+impl Ime {
+    /// Abre el teclado con un texto inicial; None si el sistema no lo permite ahora
+    pub fn open(title: &str, initial: &str, max_len: u32) -> Option<Ime> {
+        let max_len = max_len.clamp(1, 64);
+        let mut ime = Ime {
+            title: title.encode_utf16().chain(std::iter::once(0)).collect(),
+            initial: initial.encode_utf16().take(max_len as usize).chain(std::iter::once(0)).collect(),
+            buffer: vec![0u16; max_len as usize + 1],
+        };
+        unsafe {
+            let mut p: SceImeDialogParam = std::mem::zeroed();
+            // = sceImeDialogParamInit (función inline del SDK)
+            p.sdkVersion = PSP2_SDK_VERSION;
+            p.commonParam.magic = SCE_COMMON_DIALOG_MAGIC_NUMBER.wrapping_add(&p.commonParam as *const _ as u32);
+            p.supportedLanguages = 0;
+            p.languagesForced = 0;
+            p.type_ = SCE_IME_TYPE_DEFAULT;
+            p.option = 0;
+            p.textBoxMode = SCE_IME_DIALOG_TEXTBOX_MODE_WITH_CLEAR;
+            p.title = ime.title.as_ptr();
+            p.maxTextLength = max_len;
+            p.initialText = ime.initial.as_mut_ptr();
+            p.inputTextBuffer = ime.buffer.as_mut_ptr();
+            if sceImeDialogInit(&p) < 0 {
+                return None
+            }
+        }
+        IME_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+        Some(ime)
+    }
+
+    /// None = sigue abierto; Some(None) = cancelado; Some(Some(texto)) = aceptado
+    pub fn poll(&mut self) -> Option<Option<String>> {
+        unsafe {
+            if sceImeDialogGetStatus() != SCE_COMMON_DIALOG_STATUS_FINISHED {
+                return None
+            }
+            let mut r: SceImeDialogResult = std::mem::zeroed();
+            sceImeDialogGetResult(&mut r);
+            sceImeDialogTerm();
+            IME_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+            if r.button == SCE_IME_DIALOG_BUTTON_ENTER as i32 {
+                let end = self.buffer.iter().position(|&c| c == 0).unwrap_or(self.buffer.len());
+                Some(Some(String::from_utf16_lossy(&self.buffer[..end])))
+            } else {
+                Some(None)
+            }
+        }
     }
 }

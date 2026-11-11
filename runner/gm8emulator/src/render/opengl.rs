@@ -253,6 +253,10 @@ struct LazyTextures {
     page_of: Vec<u32>,
     pages: Vec<LazyPage>,
     frame: u64,
+    /// Píxeles BGRA de sprites creados en ejecución (sprite_add_sprite…) cuando van a las páginas
+    /// diferidas en vez de a una textura propia con FBO (en vitaGL cada FBO cuesta memoria y
+    /// adjuntarlos cerraba el juego)
+    own: std::collections::HashMap<i32, Box<[u8]>>,
     budget_bytes: usize,
     used_bytes: usize,
     loads: u64,
@@ -753,6 +757,44 @@ impl RendererImpl {
         }
     }
 
+    /// ¿Los sprites creados en ejecución van a las páginas diferidas? (Vita, o PC con RLD_LAZY_TEX)
+    fn dynamic_in_pages(&self) -> bool {
+        self.lazy.provider.is_some()
+    }
+
+    /// Registra un sprite creado en ejecución (píxeles BGRA) como textura diferida propia
+    fn register_own(&mut self, bgra: Box<[u8]>, w: i32, h: i32, origin_x: f32, origin_y: f32) -> AtlasRef {
+        let id = self.texture_rects.len();
+        self.texture_rects.push(Some(AtlasRect {
+            atlas_id: crate::render::atlas::LAZY_UNLOADED,
+            x: 0,
+            y: 0,
+            w,
+            h,
+            origin_x,
+            origin_y,
+        }));
+        if self.lazy.is_lazy.len() < id {
+            self.lazy.is_lazy.resize(id, false);
+            self.lazy.page_of.resize(id, u32::MAX);
+        }
+        self.lazy.is_lazy.push(true);
+        self.lazy.page_of.push(u32::MAX);
+        self.lazy.own.insert(id as i32, bgra);
+        AtlasRef(id as i32)
+    }
+
+    /// Píxeles BGRA de una textura diferida (propia o del juego)
+    fn lazy_pixels(&mut self, r: AtlasRef) -> Option<Box<[u8]>> {
+        if let Some(px) = self.lazy.own.get(&r.0) {
+            return Some(px.clone())
+        }
+        let mut provider = self.lazy.provider.take()?;
+        let res = provider(r).into_iter().find(|(x, _)| x.0 == r.0).map(|(_, p)| p);
+        self.lazy.provider = Some(provider);
+        res
+    }
+
     /// Carga en la GPU una textura diferida si aún no lo está (y la marca como usada)
     fn ensure(&mut self, atlas_ref: AtlasRef) {
         let Ok(i) = usize::try_from(atlas_ref.0) else { return };
@@ -762,6 +804,13 @@ impl RendererImpl {
         let page = self.lazy.page_of[i];
         if page != u32::MAX {
             self.lazy.pages[page as usize].last_used = self.lazy.frame;
+            return
+        }
+        if let Some(px) = self.lazy.own.remove(&atlas_ref.0) {
+            if let Some(rect) = self.texture_rects[i] {
+                self.upload_lazy(i, rect, &px);
+            }
+            self.lazy.own.insert(atlas_ref.0, px);
             return
         }
         let Some(mut provider) = self.lazy.provider.take() else { return };
@@ -886,6 +935,72 @@ impl RendererImpl {
             t.x = r.x;
             t.y = r.y;
         }
+    }
+
+    /// Presenta el búfer del juego en pantalla con escalado entero (o ajustado si no cabe ni a ×1)
+    unsafe fn present_quad(&mut self, win_w: i32, win_h: i32, fb_w: i32, fb_h: i32) {
+        let Some(u) = self.simple else { return };
+        if fb_w <= 0 || fb_h <= 0 {
+            return
+        }
+        let scale = (win_w / fb_w).min(win_h / fb_h);
+        let (w, h) = if scale >= 1 {
+            (fb_w * scale, fb_h * scale)
+        } else if win_w * fb_h <= win_h * fb_w {
+            (win_w, win_w * fb_h / fb_w)
+        } else {
+            (win_h * fb_w / fb_h, win_h)
+        };
+        let (x, y) = ((win_w - w) / 2, (win_h - h) / 2);
+        if let Ok(mut r) = crate::render::PRESENT_RECT.lock() {
+            *r = [x, y, w, h, fb_w, fb_h];
+        }
+        let mut fb_old = 0;
+        self.gl.GetIntegerv(gl::DRAW_FRAMEBUFFER_BINDING, &mut fb_old);
+        self.gl.BindFramebuffer(gl::DRAW_FRAMEBUFFER, 0);
+        self.gl.Disable(gl::SCISSOR_TEST);
+        self.gl.Disable(gl::BLEND);
+        self.gl.Viewport(0, 0, win_w, win_h);
+        self.gl.ClearColor(0.0, 0.0, 0.0, 1.0);
+        self.gl.Clear(gl::COLOR_BUFFER_BIT);
+        self.gl.Viewport(x, win_h - y - h, w, h);
+        self.gl.BindTexture(gl::TEXTURE_2D, self.framebuffer.texture);
+        let filter = if self.next_render_state.interpolate_pixels.into() { gl::LINEAR } else { gl::NEAREST };
+        self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, filter as _);
+        self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, filter as _);
+        #[rustfmt::skip]
+        let identity: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        self.gl.UniformMatrix4fv(u.model, 1, gl::FALSE, identity.as_ptr());
+        self.gl.UniformMatrix4fv(u.viewproj, 1, gl::FALSE, identity.as_ptr());
+        for loc in [u.colour_blending, u.repeat, u.lerp, u.alpha_test, u.fog_enabled] {
+            self.gl.Uniform1f(loc, 0.0);
+        }
+        self.gl.Uniform2f(u.tex_size, fb_w as f32, fb_h as f32);
+        let v = |px: f32, py: f32, tx: f32, ty: f32| Vertex {
+            pos: [px, py, 0.0],
+            tex_coord: [tx, ty],
+            blend: [1.0; 4],
+            atlas_xywh: [0.0, 0.0, fb_w as f32, fb_h as f32],
+            normal: [0.0; 3],
+        };
+        // fila 0 de la textura (abajo en GL) = arriba de la pantalla, igual que el glBlitFramebuffer original
+        let quad = [
+            v(-1.0, 1.0, 0.0, 0.0),
+            v(1.0, 1.0, 1.0, 0.0),
+            v(-1.0, -1.0, 0.0, 1.0),
+            v(1.0, 1.0, 1.0, 0.0),
+            v(1.0, -1.0, 1.0, 1.0),
+            v(-1.0, -1.0, 0.0, 1.0),
+        ];
+        self.gl.BufferData(gl::ARRAY_BUFFER, (size_of::<Vertex>() * 6) as _, quad.as_ptr().cast(), gl::STREAM_DRAW);
+        self.gl.DrawArrays(gl::TRIANGLES, 0, 6);
+        // restaurar el estado del juego
+        if self.queue_render_state.alpha_blending {
+            self.gl.Enable(gl::BLEND);
+        }
+        self.gl.Enable(gl::SCISSOR_TEST);
+        self.gl.BindFramebuffer(gl::DRAW_FRAMEBUFFER, fb_old as u32);
+        self.upload_state();
     }
 
     /// Sube el estado de dibujo al shader: bloque uniforme (original) o uniforms sueltos (simplificado)
@@ -1199,6 +1314,13 @@ impl RendererTrait for RendererImpl {
         origin_x: i32,
         origin_y: i32,
     ) -> Result<AtlasRef, String> {
+        if self.dynamic_in_pages() && width > 0 && height > 0 && data.len() == (width * height * 4) as usize {
+            let mut bgra = data;
+            for px in bgra.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            return Ok(self.register_own(bgra, width, height, origin_x as f32 / width as f32, origin_y as f32 / height as f32))
+        }
         let atlas_ref = self.create_surface(width, height, false)?;
         if let Some(rect) = self.get_rect_mut(atlas_ref) {
             rect.origin_x = origin_x as f32 / width as f32;
@@ -1238,6 +1360,16 @@ impl RendererTrait for RendererImpl {
     }
 
     fn duplicate_sprite(&mut self, atlas_ref: AtlasRef) -> Result<AtlasRef, String> {
+        if self.dynamic_in_pages() {
+            if let (Some(rect), true) = (
+                self.get_rect(atlas_ref).copied(),
+                usize::try_from(atlas_ref.0).ok().and_then(|i| self.lazy.is_lazy.get(i).copied()).unwrap_or(false),
+            ) {
+                if let Some(px) = self.lazy_pixels(atlas_ref) {
+                    return Ok(self.register_own(px, rect.w, rect.h, rect.origin_x, rect.origin_y))
+                }
+            }
+        }
         self.ensure(atlas_ref);
         if let Some(rect) = self.get_rect(atlas_ref).cloned() {
             let sprite = self.create_surface(rect.w, rect.h, false)?;
@@ -1279,6 +1411,7 @@ impl RendererTrait for RendererImpl {
             if self.lazy.is_lazy.get(i).copied().unwrap_or(false) {
                 // textura diferida: deja de existir, pero la página es compartida y no se borra
                 self.lazy.is_lazy[i] = false;
+                self.lazy.own.remove(&atlas_ref.0);
                 if let Some(p) = self.lazy.page_of.get(i).copied().filter(|&p| p != u32::MAX) {
                     self.lazy.pages[p as usize].ids.retain(|&x| x != atlas_ref.0);
                     self.lazy.page_of[i] = u32::MAX;
@@ -1326,6 +1459,11 @@ impl RendererTrait for RendererImpl {
     }
 
     fn create_sprite_colour(&mut self, width: i32, height: i32, col: Colour) -> Result<AtlasRef, String> {
+        if self.dynamic_in_pages() && width > 0 && height > 0 {
+            let px = [(col.b * 255.0) as u8, (col.g * 255.0) as u8, (col.r * 255.0) as u8, 255u8];
+            let data: Box<[u8]> = px.iter().copied().cycle().take((width * height * 4) as usize).collect();
+            return Ok(self.register_own(data, width, height, 0.0, 0.0))
+        }
         let atlas_ref = self.create_surface(width, height, false)?;
         if let Some(rect) = self.get_rect(atlas_ref) {
             unsafe {
@@ -2766,6 +2904,16 @@ impl RendererTrait for RendererImpl {
                 },
                 Scaling::Full => (0, 0, window_width, window_height),
             };
+
+            // PS Vita: escalado entero centrado (320×180 → 960×540) dibujando un rectángulo con la
+            // textura del búfer; vitaGL no tiene glBlitFramebuffer entre búferes de lectura y dibujo.
+            if self.simple.is_some() && (cfg!(target_os = "vita") || std::env::var_os("RLD_QUAD_PRESENT").is_some()) {
+                self.present_quad(window_width, window_height, fb_width, fb_height);
+                self.imp.swap_buffers();
+                self.lazy.frame += 1;
+                self.gl.GetError();
+                return
+            }
 
             // On Intel, glBlitFrameBuffer just does nothing if the scissor box is too big, which it
             // very well could be. So just disable the scissor test for now.

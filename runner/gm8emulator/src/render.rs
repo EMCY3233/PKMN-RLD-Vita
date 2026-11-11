@@ -4,6 +4,10 @@ pub mod atlas;
 /// Coordenada de textura que marca una primitiva sin textura (antes NaN; ver simple_vertex.glsl)
 pub const UNTEXTURED: f32 = -100000.0;
 
+/// Último rectángulo de pantalla donde se presentó el juego: [x, y, ancho, alto, ancho_juego, alto_juego]
+/// (para convertir toques de la pantalla táctil en coordenadas del juego)
+pub static PRESENT_RECT: std::sync::Mutex<[i32; 6]> = std::sync::Mutex::new([0, 0, 0, 0, 0, 0]);
+
 pub type LazyProvider = Box<dyn FnMut(AtlasRef) -> Vec<(AtlasRef, Box<[u8]>)>>;
 
 #[cfg(any(feature = "desktop", feature = "vitagl"))]

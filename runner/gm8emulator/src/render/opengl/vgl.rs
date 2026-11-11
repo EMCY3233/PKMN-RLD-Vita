@@ -28,6 +28,58 @@ const GL_TEXTURE_HEIGHT: GLenum = 0x1001;
 const GL_DEPTH_COMPONENT: GLenum = 0x1902;
 const GL_DEPTH_ATTACHMENT: GLenum = 0x8D00;
 const GL_BGRA: GLenum = 0x80E1;
+const GL_FRAMEBUFFER: GLenum = 0x8D40;
+const GL_READ_FRAMEBUFFER: GLenum = 0x8CA8;
+const GL_DRAW_FRAMEBUFFER: GLenum = 0x8CA9;
+const GL_DRAW_FRAMEBUFFER_BINDING: GLenum = 0x8CA6;
+const GL_READ_FRAMEBUFFER_BINDING: GLenum = 0x8CAA;
+
+/// vitaGL solo conoce GL_FRAMEBUFFER (enlazar GL_READ_FRAMEBUFFER da GL_INVALID_ENUM y adjuntar
+/// una textura a él cerraba el juego). Se emulan dos enlaces separados: el de dibujo es el real y
+/// el de lectura se enlaza solo durante las operaciones que leen (copiar, leer píxeles, adjuntar).
+static FB: Mutex<(GLuint, GLuint)> = Mutex::new((0, 0)); // (dibujo, lectura)
+
+unsafe fn with_read_fb<R>(f: impl FnOnce() -> R) -> R {
+    let (draw, read) = *FB.lock().unwrap();
+    if read != draw {
+        real(|r| (r.bind_framebuffer)(GL_FRAMEBUFFER, read));
+    }
+    let res = f();
+    if read != draw {
+        real(|r| (r.bind_framebuffer)(GL_FRAMEBUFFER, draw));
+    }
+    res
+}
+
+unsafe extern "C" fn shim_bind_framebuffer(target: GLenum, fb: GLuint) {
+    let mut st = FB.lock().unwrap();
+    match target {
+        GL_READ_FRAMEBUFFER => st.1 = fb,
+        GL_DRAW_FRAMEBUFFER => {
+            st.0 = fb;
+            drop(st);
+            real(|r| (r.bind_framebuffer)(GL_FRAMEBUFFER, fb));
+        },
+        _ => {
+            st.0 = fb;
+            st.1 = fb;
+            drop(st);
+            real(|r| (r.bind_framebuffer)(GL_FRAMEBUFFER, fb));
+        },
+    }
+}
+
+unsafe extern "C" fn shim_get_integerv(pname: GLenum, out: *mut GLint) {
+    match pname {
+        GL_DRAW_FRAMEBUFFER_BINDING => *out = FB.lock().unwrap().0 as GLint,
+        GL_READ_FRAMEBUFFER_BINDING => *out = FB.lock().unwrap().1 as GLint,
+        _ => real(|r| (r.get_integerv)(pname, out)),
+    }
+}
+
+unsafe extern "C" fn shim_read_pixels(x: GLint, y: GLint, w: GLsizei, h: GLsizei, f: GLenum, t: GLenum, out: *mut c_void) {
+    with_read_fb(|| real(|r| (r.read_pixels)(x, y, w, h, f, t, out)))
+}
 const GL_RGBA: GLenum = 0x1908;
 const GL_UNSIGNED_BYTE: GLenum = 0x1401;
 
@@ -63,6 +115,9 @@ struct Real {
     delete_textures: unsafe extern "C" fn(GLsizei, *const GLuint),
     framebuffer_texture_2d: unsafe extern "C" fn(GLenum, GLenum, GLenum, GLuint, GLint),
     get_error: unsafe extern "C" fn() -> GLenum,
+    bind_framebuffer: unsafe extern "C" fn(GLenum, GLuint),
+    get_integerv: unsafe extern "C" fn(GLenum, *mut GLint),
+    read_pixels: unsafe extern "C" fn(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, *mut c_void),
 }
 
 static REAL: Mutex<Option<Real>> = Mutex::new(None);
@@ -139,7 +194,7 @@ unsafe extern "C" fn shim_copy_tex_image_2d(
     if target == GL_TEXTURE_2D && level == 0 {
         remember_size(w, h);
     }
-    real(|r| (r.copy_tex_image_2d)(target, level, internal, x, y, w, h, border))
+    with_read_fb(|| real(|r| (r.copy_tex_image_2d)(target, level, internal, x, y, w, h, border)))
 }
 
 unsafe extern "C" fn shim_delete_textures(n: GLsizei, ids: *const GLuint) {
@@ -170,10 +225,23 @@ unsafe extern "C" fn shim_framebuffer_texture_2d(target: GLenum, attach: GLenum,
     if attach == GL_DEPTH_ATTACHMENT {
         return
     }
-    real(|r| (r.framebuffer_texture_2d)(target, attach, textarget, tex, level))
+    if target == GL_READ_FRAMEBUFFER {
+        with_read_fb(|| real(|r| (r.framebuffer_texture_2d)(GL_FRAMEBUFFER, attach, textarget, tex, level)))
+    } else {
+        real(|r| (r.framebuffer_texture_2d)(GL_FRAMEBUFFER, attach, textarget, tex, level))
+    }
 }
 
 unsafe extern "C" fn shim_provoking_vertex(_mode: GLenum) {}
+
+/// glBlitFramebuffer necesita enlaces de lectura y dibujo separados, que vitaGL no tiene. El
+/// renderizador ya no lo usa para presentar en Vita (dibuja un rectángulo con la textura); queda
+/// el redimensionado del búfer al cambiar de tamaño de sala, que se redibuja en el fotograma
+/// siguiente de todas formas.
+unsafe extern "C" fn shim_blit_framebuffer(
+    _a: GLint, _b: GLint, _c: GLint, _d: GLint, _e: GLint, _f: GLint, _g: GLint, _h: GLint, _mask: GLenum, _filter: GLenum,
+) {
+}
 
 unsafe extern "C" fn shim_get_tex_image(_target: GLenum, _level: GLint, _format: GLenum, _ty: GLenum, _out: *mut c_void) {
     // los volcados de texturas solo sirven para estados guardados del emulador, que el port no usa
@@ -260,6 +328,9 @@ impl PlatformImpl {
             delete_textures: std::mem::transmute(load("glDeleteTextures")?),
             framebuffer_texture_2d: std::mem::transmute(load("glFramebufferTexture2D")?),
             get_error: std::mem::transmute(load("glGetError")?),
+            bind_framebuffer: std::mem::transmute(load("glBindFramebuffer")?),
+            get_integerv: std::mem::transmute(load("glGetIntegerv")?),
+            read_pixels: std::mem::transmute(load("glReadPixels")?),
         });
         Ok(PlatformImpl { vsync: std::cell::Cell::new(1) })
     }
@@ -277,6 +348,12 @@ impl PlatformImpl {
                 "glProvokingVertex" => shim_provoking_vertex as *const c_void,
                 "glGetTexImage" => shim_get_tex_image as *const c_void,
                 "glGetError" => shim_get_error as *const c_void,
+                "glBindFramebuffer" => shim_bind_framebuffer as *const c_void,
+                "glGetIntegerv" => shim_get_integerv as *const c_void,
+                "glReadPixels" => shim_read_pixels as *const c_void,
+                "glBlitFramebuffer" => shim_blit_framebuffer as *const c_void,
+                // ReadBuffer(GL_BACK) no aplica en vitaGL
+                "glReadBuffer" => shim_provoking_vertex as *const c_void,
                 _ => std::ptr::null(),
             };
             if !shim.is_null() {
@@ -290,7 +367,8 @@ impl PlatformImpl {
     pub unsafe fn clean_function_loader() {}
 
     pub unsafe fn swap_buffers(&self) {
-        vglSwapBuffers(0);
+        // con el teclado del sistema en pantalla, vitaGL debe dejar dibujar el diálogo
+        vglSwapBuffers(crate::game::vita_input::IME_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) as u8);
     }
 
     pub unsafe fn set_swap_interval(&self, n: u32) -> bool {

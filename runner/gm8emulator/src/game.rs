@@ -1583,14 +1583,18 @@ impl Game {
         if self.unscaled_width != width || self.unscaled_height != height {
             self.unscaled_width = width;
             self.unscaled_height = height;
-            self.window_inner_size = (width, height);
+            if !cfg!(all(target_os = "vita", feature = "vitagl")) {
+                self.window_inner_size = (width, height);
+            }
             self.renderer.resize_framebuffer(width, height, false);
             let (width, height) = match self.scaling {
                 Scaling::Fixed(scale) => ((f64::from(width) * scale) as u32, (f64::from(height) * scale) as u32),
                 _ => (width, height),
             };
             if self.play_type != PlayType::Record {
-                self.window_inner_size = (width, height);
+                // En la Vita la "ventana" es siempre la pantalla entera; el renderizador escala
+                self.window_inner_size =
+                    if cfg!(all(target_os = "vita", feature = "vitagl")) { (960, 544) } else { (width, height) };
                 self.window.set_size((width as _, height as _));
             }
         }
@@ -2170,6 +2174,25 @@ impl Game {
                         let mb = input::ramen2mb(ramen::input::MouseButton::Left);
                         if down { self.input.mouse_press(mb, true) } else { self.input.mouse_release(mb, true) }
                     },
+                }
+            }
+            // teclado del sistema
+            if vi.ime_request && vi.ime.is_none() {
+                vi.ime_request = false;
+                let cur = self.decode_str(self.keyboard_string.as_ref()).into_owned();
+                vi.ime = vita_input::Ime::open("Pokémon Reloaded", &cur, 16);
+            }
+            if let Some(ime) = vi.ime.as_mut() {
+                if let Some(res) = ime.poll() {
+                    vi.ime = None;
+                    if let Some(text) = res {
+                        // como si se hubiera tecleado: Windows-1252, caracteres sin equivalente → '?'
+                        let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(&text);
+                        self.keyboard_string = gml::String::from(bytes.into_owned());
+                        if let Some(c) = text.chars().last() {
+                            self.keyboard_lastchar = gml::String::from(c.to_string().into_bytes());
+                        }
+                    }
                 }
             }
             self.vita_input = Some(vi);
@@ -3223,4 +3246,37 @@ fn make_lazy_provider(map: Vec<(i32, bool, u32, u32)>) -> crate::render::LazyPro
                 .collect()
         }
     })
+}
+
+
+#[cfg(all(target_os = "vita", feature = "vitagl"))]
+impl Game {
+    /// Al empezar GetDialogString (el juego pide escribir un texto) se abre el teclado de la Vita
+    /// con el texto propuesto; argumentos: (mensaje, texto inicial, mínimo, máximo)
+    pub fn vita_ime_hook(&mut self, script_id: usize, ctx: &gml::Context) {
+        let Some(vi) = self.vita_input.as_mut() else { return };
+        if vi.ime_script.is_none() {
+            let id = self
+                .assets
+                .scripts
+                .iter()
+                .position(|s| s.as_ref().map_or(false, |s| s.name.as_ref() == b"GetDialogString"));
+            vi.ime_script = Some(id.unwrap_or(usize::MAX));
+        }
+        if vi.ime_script != Some(script_id) || vi.ime.is_some() {
+            return
+        }
+        let text = |v: &gml::Value| match v {
+            gml::Value::Str(s) => Some(s.clone()),
+            _ => None,
+        };
+        let title = text(&ctx.arguments[0]).map(|s| self.decode_str(s.as_ref()).into_owned()).unwrap_or_default();
+        let initial = text(&ctx.arguments[1]).map(|s| self.decode_str(s.as_ref()).into_owned()).unwrap_or_default();
+        let max: f64 = match &ctx.arguments[3] {
+            gml::Value::Real(r) => (*r).into(),
+            _ => 16.0,
+        };
+        let vi = self.vita_input.as_mut().unwrap();
+        vi.ime = vita_input::Ime::open(&title, &initial, max.max(1.0) as u32);
+    }
 }

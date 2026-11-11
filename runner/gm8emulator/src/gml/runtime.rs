@@ -651,6 +651,8 @@ impl Game {
                     }
 
                     let mut new_context = Context::copy_with_args(context, arg_values, args.len());
+                    #[cfg(all(target_os = "vita", feature = "vitagl"))]
+                    self.vita_ime_hook(*script_id, &new_context);
                     self.bench_enter(*script_id);
                     let r = self.execute(&instructions, &mut new_context);
                     self.bench_exit();
