@@ -44,6 +44,8 @@ pub struct OverlayPage {
     pub scroll: usize,
     /// línea resaltada (para menús)
     pub selected: Option<usize>,
+    /// líneas que se pueden elegir (vacío = página sin menú)
+    pub selectable: Vec<bool>,
 }
 
 pub static OVERLAY_PAGE: std::sync::Mutex<Option<OverlayPage>> = std::sync::Mutex::new(None);

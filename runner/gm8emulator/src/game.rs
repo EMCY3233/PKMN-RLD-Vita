@@ -19,6 +19,7 @@ pub mod savestate;
 pub mod surface;
 pub mod transition;
 pub mod view;
+pub mod keymap;
 pub mod pages;
 #[cfg(all(target_os = "vita", feature = "vitagl"))]
 pub mod vita_input;
@@ -2221,14 +2222,13 @@ impl Game {
             // guía de controles (modal: el juego espera, como con el manual)
             if vi.guide_request {
                 vi.guide_request = false;
-                let lines = vi.guide_lines();
+                let (text, path) = (vi.km_text.clone(), vi.km_path.clone());
                 self.vita_input = Some(vi);
-                let _ = self.run_page_modal(crate::render::OverlayPage {
-                    title: "Guía de controles (PS Vita)".into(),
-                    lines,
-                    footer: "Arriba/Abajo: desplazar   L/R: pagina   Circulo: cerrar".into(),
-                    ..Default::default()
-                });
+                if let Some(new_text) = self.rld_controls_menu(&text, &path) {
+                    if let Some(vi) = self.vita_input.as_mut() {
+                        vi.reload(new_text);
+                    }
+                }
                 return
             }
             // Con el teclado abierto el juego suele estar en un bucle que solo lee teclas (sin dibujar):
@@ -2396,6 +2396,17 @@ impl Game {
             self.process_window_events();
 
             let t_frame = Instant::now();
+            // prueba en PC del menú de controles de la Vita (RLD_CONTROLS_TEST=fotograma)
+            if let Some(f) = std::env::var("RLD_CONTROLS_TEST").ok().and_then(|v| v.parse::<u32>().ok()) {
+                static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !DONE.load(std::sync::atomic::Ordering::Relaxed) && perf_t0.elapsed().as_millis() as u32 >= f {
+                    DONE.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let path = std::path::PathBuf::from("keymap_test.ini");
+                    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| crate::game::keymap::DEFAULT_KEYMAP.to_string());
+                    let r = self.rld_controls_menu(&text, &path);
+                    crate::startlog(&format!("menú de controles: {}", if r.is_some() { "cambiado" } else { "sin cambios" }));
+                }
+            }
             self.frame()?;
             if perf_on {
                 perf_busy += t_frame.elapsed().as_nanos() as u64;

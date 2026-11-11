@@ -197,11 +197,65 @@ fn page_open() -> bool {
 
 /// Mueve la página abierta: +n / -n líneas
 pub fn page_scroll(delta: i32) {
+    if page_is_menu() {
+        return page_move_sel(delta)
+    }
     if let Ok(mut p) = OVERLAY_PAGE.lock() {
         if let Some(p) = p.as_mut() {
             let max = p.lines.len().saturating_sub(PAGE_LINES) as i32;
             p.scroll = (p.scroll as i32 + delta).clamp(0, max) as usize;
         }
+    }
+}
+
+static PAGE_RESULT: std::sync::Mutex<Option<(char, usize)>> = std::sync::Mutex::new(None);
+
+/// ¿La página abierta es un menú (con líneas elegibles)?
+pub fn page_is_menu() -> bool {
+    OVERLAY_PAGE.lock().map_or(false, |p| p.as_ref().map_or(false, |p| !p.selectable.is_empty()))
+}
+
+/// Mueve la selección `delta` líneas elegibles (o una página si |delta| > 1) y desplaza para que se vea
+pub fn page_move_sel(delta: i32) {
+    if let Ok(mut p) = OVERLAY_PAGE.lock() {
+        if let Some(p) = p.as_mut() {
+            let n = p.lines.len().min(p.selectable.len());
+            if n == 0 {
+                return
+            }
+            let mut cur = p.selected.unwrap_or(0) as i32;
+            let steps = delta.unsigned_abs();
+            let dir = delta.signum();
+            for _ in 0..steps {
+                let mut j = cur + dir;
+                while j >= 0 && (j as usize) < n && !p.selectable[j as usize] {
+                    j += dir;
+                }
+                if j < 0 || j as usize >= n {
+                    break
+                }
+                cur = j;
+            }
+            p.selected = Some(cur as usize);
+            let cur = cur as usize;
+            if cur < p.scroll {
+                p.scroll = cur.saturating_sub(1);
+            } else if cur >= p.scroll + PAGE_LINES {
+                p.scroll = (cur + 2).saturating_sub(PAGE_LINES).min(p.lines.len().saturating_sub(PAGE_LINES));
+            }
+        }
+    }
+}
+
+/// Elige la línea seleccionada ('a' = aceptar, 't' = acción alternativa) y cierra la página
+pub fn page_accept(kind: char) {
+    if let Ok(mut p) = OVERLAY_PAGE.lock() {
+        if let Some(sel) = p.as_ref().and_then(|p| p.selected) {
+            if let Ok(mut r) = PAGE_RESULT.lock() {
+                *r = Some((kind, sel));
+            }
+        }
+        *p = None;
     }
 }
 
@@ -226,10 +280,20 @@ impl Game {
         self.input.keyboard_clear_all();
         while page_open() {
             self.process_window_events();
-            // teclado de PC (en la Vita lo gestiona vita_input)
-            for vk in [0x58u8, 0x5A, 0x0D, 0x1B] {
-                if self.input.keyboard_check_pressed(vk) {
+            // teclado de PC (en la Vita lo gestiona vita_input). En menús: Z/Enter elegir, V alternativa, X/Esc salir
+            if page_is_menu() {
+                if self.input.keyboard_check_pressed(0x5A) || self.input.keyboard_check_pressed(0x0D) {
+                    page_accept('a');
+                } else if self.input.keyboard_check_pressed(0x56) {
+                    page_accept('t');
+                } else if self.input.keyboard_check_pressed(0x58) || self.input.keyboard_check_pressed(0x1B) {
                     page_close();
+                }
+            } else {
+                for vk in [0x58u8, 0x5A, 0x0D, 0x1B] {
+                    if self.input.keyboard_check_pressed(vk) {
+                        page_close();
+                    }
                 }
             }
             if self.input.keyboard_check_pressed(0x28) {
@@ -252,6 +316,15 @@ impl Game {
         // que la tecla de cerrar no llegue al juego
         self.input.keyboard_clear_all();
         Ok(())
+    }
+
+    /// Muestra un menú y espera: Some((tipo, línea)) si se eligió algo, None si se cerró
+    pub fn run_menu(&mut self, page: OverlayPage) -> Option<(char, usize)> {
+        if let Ok(mut r) = PAGE_RESULT.lock() {
+            *r = None;
+        }
+        let _ = self.run_page_modal(page);
+        PAGE_RESULT.lock().ok().and_then(|mut r| r.take())
     }
 
     /// load_info(fname): guarda el texto del manual para el siguiente show_info

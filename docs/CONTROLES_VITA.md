@@ -23,6 +23,11 @@ Barra de teclas en pantalla (**laterales**: 1-6 a la izquierda, 7 8 9 0 \ L a la
 Pokémon 1-6 en combate, MO 5/6/7, 8 habilidades externas, 9 Xpod, 0 comandos, \ ver Pokémon, L áreas.
 Sustituye al panel trasero, desactivado por defecto para evitar roces (se puede activar en `keymap.ini`).
 
+**Cambiar los botones sin salir del juego**: L+R+○ abre la guía; con la cruceta se elige un botón,
+✕ abre la lista de teclas (cada una con lo que hace en el juego) y ✕ la asigna. Se guarda al momento en
+`ux0:data/reloaded/keymap.ini`, conservando los comentarios. △ en la guía restaura los controles originales.
+SELECT+L = F1 (ayuda) y SELECT+R = Q (misiones) funcionan desde esta versión (antes no se enviaban).
+
 Páginas del runner (guía, manual del juego con show_info, imágenes con show_image): ↑/↓ desplazar,
 L/R o ←/→ página, ○/✕/START cerrar. El juego queda en pausa mientras están abiertas.
 

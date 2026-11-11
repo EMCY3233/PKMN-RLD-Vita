@@ -250,7 +250,6 @@ fn simple_shader_source(src: &str, fragment: bool) -> std::ffi::CString {
 /// gráfica (178 MB en RGBA frente a 112 MB de VRAM), así que se descomprimen al dibujarlos por
 /// primera vez y se colocan en páginas de 1024×1024. Si se supera el presupuesto, se vacía la
 /// página usada hace más tiempo (sus sprites se volverán a cargar si hacen falta).
-#[derive(Default)]
 #[cfg(target_os = "vita")]
 fn platform_mem_report() -> String {
     vgl::mem_report()
@@ -260,6 +259,7 @@ fn platform_mem_report() -> String {
     String::new()
 }
 
+#[derive(Default)]
 struct LazyTextures {
     provider: Option<crate::render::LazyProvider>,
     /// AtlasRef → es diferida
