@@ -911,6 +911,14 @@ impl RendererImpl {
     }
 
     fn upload_lazy(&mut self, id: usize, rect: AtlasRect, pixels: &[u8]) {
+        let t_up = std::time::Instant::now();
+        self.upload_lazy_inner(id, rect, pixels);
+        let ns = t_up.elapsed().as_nanos() as u64;
+        crate::hitch::add_load_ns(ns);
+        crate::hitch::note("subir textura", ns as f64 / 1e6);
+    }
+
+    fn upload_lazy_inner(&mut self, id: usize, rect: AtlasRect, pixels: &[u8]) {
         let (w, h) = (rect.w, rect.h);
         let frame = self.lazy.frame;
         // 1) hueco en una página existente
@@ -945,6 +953,8 @@ impl RendererImpl {
                     .map(|(i, _)| i);
                 if let Some(v) = victim {
                     self.flush_queue();
+                    // la página se va a reescribir en su sitio (TEXTURES_SPEEDHACK): que la GPU acabe antes
+                    unsafe { self.gl.Finish() };
                     let page = &mut self.lazy.pages[v];
                     for &old in &page.ids {
                         self.lazy.page_of[old as usize] = u32::MAX;
@@ -1377,6 +1387,12 @@ impl RendererImpl {
     }
 
     fn draw_buffer(&mut self, atlas_id: u32, shape: PrimitiveShape, buffer: &[Vertex]) {
+        let t_db = std::time::Instant::now();
+        self.draw_buffer_inner(atlas_id, shape, buffer);
+        crate::hitch::note("enviar lote a la GPU", t_db.elapsed().as_secs_f64() * 1e3);
+    }
+
+    fn draw_buffer_inner(&mut self, atlas_id: u32, shape: PrimitiveShape, buffer: &[Vertex]) {
         if buffer.is_empty() {
             return
         }
@@ -2502,6 +2518,9 @@ impl RendererTrait for RendererImpl {
             return
         }
         self.flush_queue();
+        // con el vitaGL de TEXTURES_SPEEDHACK los huecos se reescriben en su sitio: esperar a que la GPU
+        // termine lo pendiente antes de reutilizarlos
+        unsafe { self.gl.Finish() };
         for page in self.lazy.pages.iter_mut() {
             for &old in &page.ids {
                 self.lazy.page_of[old as usize] = u32::MAX;

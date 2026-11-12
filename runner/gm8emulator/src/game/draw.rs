@@ -345,7 +345,15 @@ impl Game {
                 if game.custom_draw_objects.contains(&instance.object_index.get()) {
                     // Custom draw event
                     let t = std::time::Instant::now();
+                    let prev = crate::hitch::set_timing(true);
                     let r = game.run_instance_event(gml::ev::DRAW, 0, idx, idx, None);
+                    crate::hitch::set_timing(prev);
+                    let ms = t.elapsed().as_secs_f64() * 1e3;
+                    if ms >= 8.0 {
+                        let obj = game.room.instance_list.get(idx).object_index.get();
+                        let name = game.assets.objects.get_asset(obj).map(|o| game.decode_str(o.name.as_ref()).into_owned()).unwrap_or_default();
+                        crate::hitch::note(&format!("dibujo de {}", name), ms);
+                    }
                     DRAW_STATS.with(|c| {
                         let (ns, n, d) = c.get();
                         c.set((ns + t.elapsed().as_nanos() as u64, n + 1, d));

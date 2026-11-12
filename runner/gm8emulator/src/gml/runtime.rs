@@ -618,28 +618,28 @@ impl Game {
                 for (src, dest) in args.iter().zip(arg_values.iter_mut()) {
                     *dest = self.eval(src, context)?;
                 }
-                { let p = self.bench_enter_fn(function.0 as *const () as usize); let r = function.0(self, context, &arg_values[..args.len()]); if p { self.bench_exit(); } r }
+                { let p = self.bench_enter_fn(function.0 as *const () as usize); let ht = if crate::hitch::timing_on() { Some(std::time::Instant::now()) } else { None }; let r = function.0(self, context, &arg_values[..args.len()]); if let Some(t) = ht { crate::hitch::note_fn(function.0 as *const () as usize, t); } if p { self.bench_exit(); } r }
             },
             Node::StateFunction { args, function } => {
                 let mut arg_values: [Value; 16] = Default::default();
                 for (src, dest) in args.iter().zip(arg_values.iter_mut()) {
                     *dest = self.eval(src, context)?;
                 }
-                { let p = self.bench_enter_fn(function.0 as *const () as usize); let r = function.0(self, &arg_values[..args.len()]); if p { self.bench_exit(); } r }
+                { let p = self.bench_enter_fn(function.0 as *const () as usize); let ht = if crate::hitch::timing_on() { Some(std::time::Instant::now()) } else { None }; let r = function.0(self, &arg_values[..args.len()]); if let Some(t) = ht { crate::hitch::note_fn(function.0 as *const () as usize, t); } if p { self.bench_exit(); } r }
             },
             Node::RoutineFunction { args, function } => {
                 let mut arg_values: [Value; 16] = Default::default();
                 for (src, dest) in args.iter().zip(arg_values.iter_mut()) {
                     *dest = self.eval(src, context)?;
                 }
-                { let p = self.bench_enter_fn(function.0 as *const () as usize); let r = function.0(self, &arg_values[..args.len()]); if p { self.bench_exit(); } r }
+                { let p = self.bench_enter_fn(function.0 as *const () as usize); let ht = if crate::hitch::timing_on() { Some(std::time::Instant::now()) } else { None }; let r = function.0(self, &arg_values[..args.len()]); if let Some(t) = ht { crate::hitch::note_fn(function.0 as *const () as usize, t); } if p { self.bench_exit(); } r }
             },
             Node::ValueFunction { args, function } => {
                 let mut arg_values: [Value; 16] = Default::default();
                 for (src, dest) in args.iter().zip(arg_values.iter_mut()) {
                     *dest = self.eval(src, context)?;
                 }
-                { let p = self.bench_enter_fn(function.0 as *const () as usize); let r = function.0(&arg_values[..args.len()]); if p { self.bench_exit(); } r }
+                { let p = self.bench_enter_fn(function.0 as *const () as usize); let ht = if crate::hitch::timing_on() { Some(std::time::Instant::now()) } else { None }; let r = function.0(&arg_values[..args.len()]); if let Some(t) = ht { crate::hitch::note_fn(function.0 as *const () as usize, t); } if p { self.bench_exit(); } r }
             },
             Node::Script { args, script_id } => {
                 if let Some(Some(_)) = self.assets.scripts.get(*script_id) {

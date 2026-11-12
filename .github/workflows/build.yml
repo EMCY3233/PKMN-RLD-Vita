@@ -131,6 +131,21 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - name: Instalar cargo-vita
         run: cargo install cargo-vita --locked
+      - name: vitaGL propio (TEXTURES_SPEEDHACK)
+        # El vitaGL de VitaSDK copia la textura ENTERA cada vez que se actualiza un trozo de una
+        # textura usada en los últimos 4 fotogramas (glTexSubImage2D). Las páginas de sprites
+        # diferidos son de 32 MB y se usan en cada fotograma: cada sprite nuevo costaba ~500 ms
+        # (los tirones periódicos del registro). Con TEXTURES_SPEEDHACK se escribe en su sitio; el
+        # runner solo escribe en huecos libres de la página, así que no hay riesgo de pisar algo que
+        # la GPU esté dibujando. Mismo commit y opciones que el paquete de VitaSDK + la opción.
+        shell: bash
+        run: |
+          git clone https://github.com/Rinnegatamante/vitaGL.git /tmp/vitaGL
+          cd /tmp/vitaGL
+          git checkout 2bdbe895ddc6a7e410a9ea55a8f53d8173c61ad8 || echo "commit no encontrado: se usa HEAD"
+          make NO_DEBUG=1 TEXTURES_SPEEDHACK=1 -j$(nproc)
+          cp libvitaGL.a $VITASDK/arm-vita-eabi/lib/libvitaGL.a
+          cp source/vitaGL.h $VITASDK/arm-vita-eabi/include/vitaGL.h
       - name: Compilar VPK del runner con vitaGL
         working-directory: runner/gm8emulator
         env:

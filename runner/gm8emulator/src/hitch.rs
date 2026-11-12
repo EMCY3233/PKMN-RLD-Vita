@@ -65,3 +65,30 @@ pub fn take() -> (f64, Vec<(String, f64)>) {
     let items = ITEMS.with(|v| std::mem::take(&mut *v.borrow_mut()));
     (ns as f64 / 1e6, items)
 }
+
+thread_local! {
+    static TIMING: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// Medir cada llamada a función/script (solo durante los eventos de dibujo)
+#[inline]
+pub fn timing_on() -> bool {
+    TIMING.with(|c| c.get())
+}
+
+pub fn set_timing(on: bool) -> bool {
+    TIMING.with(|c| c.replace(on))
+}
+
+/// Función del motor lenta (se busca su nombre solo si pasa del umbral)
+pub fn note_fn(addr: usize, t: Instant) {
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    if ms >= item_ms() {
+        let name = crate::gml::mappings::FUNCTIONS
+            .entries()
+            .find(|(_, f)| f.addr() as usize == addr)
+            .map(|(n, _)| format!("{}()", n))
+            .unwrap_or_else(|| format!("fn@{:x}", addr));
+        note(&name, ms);
+    }
+}
