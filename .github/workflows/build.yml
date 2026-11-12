@@ -1,9 +1,19 @@
 name: Build
 
+# Para ahorrar minutos de Actions (repositorio privado: 2.000 min/mes en el plan gratuito):
+# - solo al enviar cambios del runner o de la Vita a port-inicial (no por pull_request: duplicaba cada
+#   compilación), o a mano desde la pestaña Actions;
+# - por defecto solo se compila el VPK con gráficos; el resto de trabajos solo a mano (todos=true).
 on:
   push:
-  pull_request:
+    branches: [port-inicial]
+    paths: ['runner/**', 'vita/**', '.github/workflows/**']
   workflow_dispatch:
+    inputs:
+      todos:
+        description: 'Compilar también Linux, benchmark y VPK de prueba'
+        type: boolean
+        default: false
 
 # Un envío a una rama con pull request abierto lanzaba dos compilaciones idénticas (push y pull_request):
 # la más reciente cancela a la otra, así cada cambio gasta la mitad de minutos de Actions.
@@ -14,6 +24,7 @@ concurrency:
 jobs:
   linux-runner:
     name: Runner (Linux)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.todos }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +47,7 @@ jobs:
 
   vita-loader-test:
     name: VPK de prueba (PS Vita)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.todos }}
     runs-on: ubuntu-24.04
     container: vitasdk/vitasdk:latest
     steps:
@@ -74,6 +86,7 @@ jobs:
 
   vita-runner-bench:
     name: Runner Vita (benchmark)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.todos }}
     runs-on: ubuntu-24.04
     container: vitasdk/vitasdk:latest
     steps:
@@ -129,8 +142,21 @@ jobs:
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Caché de compilación (cargo-vita, crates y objetos)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-vita
+            ~/.cargo/registry
+            ~/.cargo/git
+            runner/target
+            /tmp/vitaGL
+          key: vita-gl-${{ hashFiles('runner/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            vita-gl-${{ hashFiles('runner/Cargo.lock') }}-
+            vita-gl-
       - name: Instalar cargo-vita
-        run: cargo install cargo-vita --locked
+        run: command -v cargo-vita || cargo install cargo-vita --locked
       - name: vitaGL propio (TEXTURES_SPEEDHACK)
         # El vitaGL de VitaSDK copia la textura ENTERA cada vez que se actualiza un trozo de una
         # textura usada en los últimos 4 fotogramas (glTexSubImage2D). Las páginas de sprites
@@ -140,10 +166,14 @@ jobs:
         # la GPU esté dibujando. Mismo commit y opciones que el paquete de VitaSDK + la opción.
         shell: bash
         run: |
-          git clone https://github.com/Rinnegatamante/vitaGL.git /tmp/vitaGL
+          if [ ! -f /tmp/vitaGL/libvitaGL.a ]; then
+            rm -rf /tmp/vitaGL
+            git clone https://github.com/Rinnegatamante/vitaGL.git /tmp/vitaGL
+            cd /tmp/vitaGL
+            git checkout 2bdbe895ddc6a7e410a9ea55a8f53d8173c61ad8 || echo "commit no encontrado: se usa HEAD"
+            make NO_DEBUG=1 TEXTURES_SPEEDHACK=1 -j$(nproc)
+          fi
           cd /tmp/vitaGL
-          git checkout 2bdbe895ddc6a7e410a9ea55a8f53d8173c61ad8 || echo "commit no encontrado: se usa HEAD"
-          make NO_DEBUG=1 TEXTURES_SPEEDHACK=1 -j$(nproc)
           cp libvitaGL.a $VITASDK/arm-vita-eabi/lib/libvitaGL.a
           cp source/vitaGL.h $VITASDK/arm-vita-eabi/include/vitaGL.h
       - name: Compilar VPK del runner con vitaGL
