@@ -163,6 +163,10 @@ pub struct InstanceList {
     draw_order: Vec<usize>,
     object_id_map: FastHashMap<ID, Vec<usize>>, // Object ID <-> Count
     object_id_map_inherit: FastHashMap<ID, Vec<usize>>,
+    /// id de instancia -> handle (antes get_by_instid recorría todas: con 1.500 instancias en el Lago
+    /// cada `(id).x` o `with(id)` costaba un recorrido entero)
+    #[serde(skip)]
+    id_map: FastHashMap<ID, usize>,
 }
 
 // generic purpose non-borrowing iterators
@@ -226,6 +230,7 @@ impl InstanceList {
             draw_order: Vec::new(),
             object_id_map: FastHashMap::default(),
             object_id_map_inherit: FastHashMap::default(),
+            id_map: FastHashMap::default(),
         }
     }
 
@@ -236,6 +241,14 @@ impl InstanceList {
     pub fn get_by_instid(&self, instance_index: ID) -> Option<usize> {
         // gm8 will check the entire instance list if the first one doesn't match
         // instances shouldn't have matching ids anyway so eh it's faster to short circuit
+        if self.id_map.len() == self.draw_order.len() {
+            return self
+                .id_map
+                .get(&instance_index)
+                .copied()
+                .filter(|&inst| self.get(inst).id.get() == instance_index)
+                .filter(|&inst| self.get(inst).state.get() == InstanceState::Active)
+        }
         self.draw_order
             .iter()
             .copied()
@@ -309,8 +322,12 @@ impl InstanceList {
 
     pub fn insert(&mut self, el: Instance) -> usize {
         let object_id = el.object_index.get();
+        let inst_id = el.id.get();
         let value = self.chunks.insert(el);
         self.draw_order.push(value);
+        // con un id repetido el tamaño del mapa deja de coincidir con draw_order y se usa el
+        // recorrido lineal (comportamiento original) hasta que refresh_maps lo reconstruya
+        self.id_map.insert(inst_id, value);
         self.object_id_map.entry(object_id).or_insert(Vec::new()).push(value);
         for &parent in self.get(value).parents.clone().borrow().iter() {
             self.object_id_map_inherit.entry(parent).or_insert(Vec::new()).push(value);
@@ -329,6 +346,18 @@ impl InstanceList {
     pub fn refresh_maps(&mut self) {
         self.object_id_map.clear();
         self.object_id_map_inherit.clear();
+        self.id_map.clear();
+        let mut dup = false;
+        for &h in &self.draw_order {
+            if let Some(inst) = self.chunks.get(h) {
+                if self.id_map.insert(inst.id.get(), h).is_some() {
+                    dup = true;
+                }
+            }
+        }
+        if dup {
+            self.id_map.clear(); // con ids repetidos, recorrido lineal (comportamiento original)
+        }
 
         let mut iter = self.iter_by_drawing();
         while let Some(handle) = iter.next(self) {

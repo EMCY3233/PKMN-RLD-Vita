@@ -920,8 +920,14 @@ impl RendererImpl {
         // 2) vaciar la página usada hace más tiempo (si no cabe otra en el presupuesto)
         if found.is_none() {
             let need = {
+                // páginas de 2048×4096 (32 MB) si el presupuesto da para dos: los sprites de un combate
+                // (~900 texturas animadas) no caben en 2048×2048 y repartidos en dos páginas cada lote
+                // cambiaba de textura. RLD_LAZY_TALL=0 para volver a 2048×2048.
+                let tall = std::env::var("RLD_LAZY_TALL").map_or(true, |v| v != "0")
+                    && self.lazy.budget_bytes >= (lazy_page() as usize) * (lazy_page() as usize) * 4 * 4;
+                let base_h = if tall { lazy_page() * 2 } else { lazy_page() };
                 let pw = lazy_page().max((w as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
-                let ph = lazy_page().max((h as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
+                let ph = base_h.max((h as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
                 (pw, ph)
             };
             if self.lazy.used_bytes + (need.0 * need.1 * 4) as usize > self.lazy.budget_bytes {
@@ -2470,7 +2476,24 @@ impl RendererTrait for RendererImpl {
         // Al cambiar de sala: si las páginas ocupan más de la mitad del presupuesto, se vacían todas y
         // lo que haga falta se vuelve a cargar al dibujarlo. Así los huecos de sprites borrados y lo de
         // salas anteriores no obligan a repartir los sprites de la sala en muchas páginas.
-        if self.lazy.pages.is_empty() || self.lazy.used_bytes * 2 <= self.lazy.budget_bytes {
+        // También en cuanto los sprites vivos ocupan más de una página (o casi toda una): si no, los de
+        // la sala nueva se reparten entre páginas y cada lote cambia de textura (en la Vita se vio
+        // 2.400 cambios por fotograma en el menú Pokémon y 250 en combate, 10-20 ms de dibujo).
+        if self.lazy.pages.is_empty() {
+            return
+        }
+        let non_empty = self.lazy.pages.iter().filter(|p| !p.ids.is_empty()).count();
+        let page_px = self.lazy.pages.iter().map(|p| (p.size.0 as usize) * (p.size.1 as usize)).max().unwrap_or(0);
+        let live_px: usize = self
+            .lazy
+            .pages
+            .iter()
+            .flat_map(|p| p.ids.iter())
+            .filter_map(|&id| self.texture_rects.get(id as usize).copied().flatten())
+            .map(|r| (r.w.max(0) as usize) * (r.h.max(0) as usize))
+            .sum();
+        let crowded = non_empty > 1 || live_px * 10 > page_px * 6;
+        if !crowded && self.lazy.used_bytes * 2 <= self.lazy.budget_bytes {
             return
         }
         self.flush_queue();

@@ -1,3 +1,11 @@
+thread_local! {
+    static HOLDER_STATS: std::cell::RefCell<std::collections::HashMap<(usize, u32, ID), (u64, u64)>> = Default::default();
+}
+fn dbg_holders() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RLD_DEBUG_HOLDERS").is_some())
+}
+
 use crate::{
     asset::trigger::TriggerTime,
     game::{Game, GetAsset},
@@ -17,13 +25,76 @@ impl Game {
         };
         let mut position = 0;
         while let Some(&object_id) = holders.borrow().get(position) {
+            // paso de solo visibilidad (game::accel::visibility_step) sin pasar por run_instance_event:
+            // en el Lago son ~1.400 instancias por fotograma y la preparación de cada evento pesaba más
+            // que el propio cálculo
+            if event_id == gml::ev::STEP && event_sub == 0 && self.scene_change.is_none() && !self.fast_visibility.is_empty() {
+                if let Some(margin) = self.fast_visibility_for(object_id) {
+                    let mut iter = self.room.instance_list.iter_by_object(object_id);
+                    while let Some(instance) = iter.next(&self.room.instance_list) {
+                        let inst = self.room.instance_list.get(instance);
+                        let v = self.in_view_f64(inst.x.get().into(), inst.y.get().into(), margin);
+                        inst.visible.set(v);
+                    }
+                    position += 1;
+                    continue
+                }
+            }
+            let dbg_t = if dbg_holders() { Some(std::time::Instant::now()) } else { None };
+            let mut n = 0u32;
             let mut iter = self.room.instance_list.iter_by_object(object_id);
             while let Some(instance) = iter.next(&self.room.instance_list) {
                 self.run_instance_event(event_id, event_sub, instance, other.unwrap_or(instance), None)?;
+                n += 1;
+            }
+            if let Some(t) = dbg_t {
+                HOLDER_STATS.with(|h| {
+                    let mut h = h.borrow_mut();
+                    let e = h.entry((event_id, event_sub, object_id)).or_insert((0, 0));
+                    e.0 += t.elapsed().as_nanos() as u64;
+                    e.1 += n as u64;
+                });
             }
             position += 1;
         }
         Ok(())
+    }
+
+    /// RLD_DEBUG_HOLDERS: tiempo por (evento, objeto) en run_object_event; se vuelca y vacía al llamar
+    pub fn dump_holder_stats(&self, frames: u64) {
+        HOLDER_STATS.with(|h| {
+            let mut v: Vec<_> = h.borrow_mut().drain().collect();
+            v.sort_by_key(|(_, (t, _))| std::cmp::Reverse(*t));
+            for ((ev, sub, obj), (t, n)) in v.into_iter().take(15) {
+                let name = self.assets.objects.get_asset(obj).map(|o| self.decode_str(o.name.as_ref()).into_owned()).unwrap_or_default();
+                crate::startlog(&format!("  evento {}/{} {}: {:.3} ms/fotograma, {:.0} instancias/fotograma", ev, sub, name, t as f64 / frames as f64 / 1e6, n as f64 / frames as f64));
+            }
+        });
+    }
+
+    /// Si el paso (STEP 0) que heredan las instancias de este objeto es de solo visibilidad y se aplica
+    /// en esta sala, su margen.
+    fn fast_visibility_for(&self, object_id: ID) -> Option<f64> {
+        let mut id = object_id;
+        loop {
+            let object = self.assets.objects.get_asset(id)?;
+            if object.events.get(gml::ev::STEP).map_or(false, |m| m.contains_key(&0)) {
+                let &(skip_room, margin) = self.fast_visibility.get(&id)?;
+                return if skip_room != Some(self.room.id) { Some(margin) } else { None }
+            }
+            id = object.parent_index;
+        }
+    }
+
+    /// InstanceInView en f64, con las mismas operaciones y comparaciones (épsilon de GML) que rld_in_view
+    #[inline]
+    pub fn in_view_f64(&self, x: f64, y: f64, m: f64) -> bool {
+        let eps: f64 = crate::math::Real::CMP_EPSILON.into();
+        let v = &self.room.views[0];
+        let (xv, yv, wv, hv) = (f64::from(v.source_x), f64::from(v.source_y), f64::from(v.source_w), f64::from(v.source_h));
+        let lt = |a: f64, b: f64| a - b <= -eps;
+        let gt = |a: f64, b: f64| a - b >= eps;
+        !(lt(x, xv - m) || gt(x, xv + wv + m) || lt(y, yv - m) || gt(y, yv + hv + m))
     }
 
     /// Runs an "Other" event on all instances, without thinking about the event holders first.

@@ -128,6 +128,8 @@ mod game_epoch_serde {
 /// Structure which contains all the components of a game.
 thread_local! {
     pub static PERF_DRAW_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    /// tiempo por fase de frame() para el registro de rendimiento (ver PERF_PHASE_NAMES)
+    pub static PERF_PHASE_NS: std::cell::RefCell<[u64; 14]> = std::cell::RefCell::new([0; 14]);
     /// tiempo gastado compilando scripts (compilación diferida)
     pub static COMPILE_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
     static PERF_PRESENT_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
@@ -2027,6 +2029,7 @@ impl Game {
             return Ok(());
         }
 
+        let mut pt = Instant::now();
         // Update xprevious and yprevious for all instances
         let mut iter = self.room.instance_list.iter_by_drawing();
         while let Some(instance) = iter.next(&self.room.instance_list).map(|x| self.room.instance_list.get(x)) {
@@ -2035,6 +2038,7 @@ impl Game {
             instance.path_positionprevious.set(instance.path_position.get().clamp(0.into(), 1.into()));
         }
 
+        perf_phase(&mut pt, 0);
         // Begin step trigger events
         self.run_triggers(trigger::TriggerTime::BeginStep)?;
         if self.scene_change.is_some() {
@@ -2047,6 +2051,7 @@ impl Game {
             return Ok(());
         }
 
+        perf_phase(&mut pt, 1);
         // Advance timelines for all instances
         let mut iter = self.room.instance_list.iter_by_drawing();
         while let Some(handle) = iter.next(&self.room.instance_list) {
@@ -2098,12 +2103,14 @@ impl Game {
             return Ok(());
         }
 
+        perf_phase(&mut pt, 2);
         // Alarm events
         self.run_alarms()?;
         if self.scene_change.is_some() {
             return Ok(());
         }
 
+        perf_phase(&mut pt, 3);
         // Key events
         self.run_keyboard_events()?;
         if self.scene_change.is_some() {
@@ -2128,6 +2135,7 @@ impl Game {
             return Ok(());
         }
 
+        perf_phase(&mut pt, 4);
         // Step trigger events
         self.run_triggers(trigger::TriggerTime::Step)?;
         if self.scene_change.is_some() {
@@ -2140,6 +2148,7 @@ impl Game {
             return Ok(());
         }
 
+        perf_phase(&mut pt, 5);
         // Movement: apply friction, gravity, and hspeed/vspeed
         self.process_speeds();
         let mut iter = self.room.instance_list.iter_by_drawing();
@@ -2150,18 +2159,21 @@ impl Game {
             }
         }
 
+        perf_phase(&mut pt, 6);
         // Outside room, intersect boundary, outside/intersect view
         self.run_bound_events()?;
         if self.scene_change.is_some() {
             return Ok(());
         }
 
+        perf_phase(&mut pt, 7);
         // Run collision events
         self.run_collisions()?;
         if self.scene_change.is_some() {
             return Ok(());
         }
 
+        perf_phase(&mut pt, 8);
         // End step trigger events
         self.run_triggers(trigger::TriggerTime::EndStep)?;
         if self.scene_change.is_some() {
@@ -2176,9 +2188,11 @@ impl Game {
 
         self.particles.auto_update_systems(&mut self.rand);
 
+        perf_phase(&mut pt, 9);
         // Clear out any deleted instances
         self.room.instance_list.remove_with(|instance| instance.state.get() == InstanceState::Deleted);
 
+        perf_phase(&mut pt, 10);
         // Draw everything, including running draw events
         if self.auto_draw {
             let t = Instant::now();
@@ -2186,12 +2200,14 @@ impl Game {
             PERF_DRAW_NS.with(|c| c.set(c.get() + t.elapsed().as_nanos() as u64));
         }
 
+        perf_phase(&mut pt, 11);
         // Move backgrounds
         for bg in self.room.backgrounds.iter_mut() {
             bg.x_offset += bg.hspeed;
             bg.y_offset += bg.vspeed;
         }
 
+        perf_phase(&mut pt, 12);
         // Advance sprite animations
         let mut iter = self.room.instance_list.iter_by_drawing();
         while let Some(handle) = iter.next(&self.room.instance_list) {
@@ -2210,6 +2226,7 @@ impl Game {
             }
         }
         self.cursor_sprite_frame += 1;
+        perf_phase(&mut pt, 13);
 
         // Tell renderer to finish the frame
         if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
@@ -2495,6 +2512,17 @@ impl Game {
                         self.room.instance_list.count_all(),
                     ));
                     crate::startlog(&format!("  dibujo: {}", self.renderer.perf_stats()));
+                    {
+                        let ph = PERF_PHASE_NS.with(|p| std::mem::replace(&mut *p.borrow_mut(), [0; 14]));
+                        let mut idx: Vec<usize> = (0..14).filter(|&i| i != 11).collect();
+                        idx.sort_by_key(|&i| std::cmp::Reverse(ph[i]));
+                        let parts: Vec<String> =
+                            idx.iter().take(6).map(|&i| format!("{} {:.1}", PERF_PHASE_NAMES[i], ph[i] as f64 / f / 1e6)).collect();
+                        crate::startlog(&format!("  lógica (ms/fotograma): {}", parts.join(", ")));
+                    }
+                    if std::env::var_os("RLD_DEBUG_HOLDERS").is_some() {
+                        self.dump_holder_stats(perf_frames.max(1) as u64);
+                    }
                     perf_t0 = Instant::now();
                     perf_frames = 0;
                     perf_busy = 0;
@@ -3340,6 +3368,19 @@ impl Game {
     }
 }
 
+pub const PERF_PHASE_NAMES: [&str; 14] = [
+    "previas", "begin step", "timelines", "alarmas", "teclado/ratón", "step", "movimiento", "límites",
+    "colisiones", "end step", "borrar", "dibujo", "fondos", "animación",
+];
+
+#[inline]
+fn perf_phase(t: &mut Instant, i: usize) {
+    let now = Instant::now();
+    let d = now.duration_since(*t).as_nanos() as u64;
+    *t = now;
+    PERF_PHASE_NS.with(|p| p.borrow_mut()[i] += d);
+}
+
 impl Game {
     /// Código compilado de una script; la compila la primera vez que se necesita.
     pub fn script_code(&mut self, id: usize) -> gml::Result<std::rc::Rc<[crate::gml::runtime::Instruction]>> {
@@ -3354,6 +3395,7 @@ impl Game {
         };
         let t0 = Instant::now();
         let src = crate::game::accel::rewrite_script(&self.assets.scripts, id, src);
+        let t_rw = t0.elapsed();
         let code = self
             .compiler
             .compile(src.as_ref())
@@ -3363,7 +3405,7 @@ impl Game {
         self.hot_note_compile(id, el.as_secs_f64() * 1e3);
         if el.as_millis() >= 2 && std::env::var_os("RLD_DEBUG_COMPILE").is_some() {
             let name = self.assets.scripts.get(id).and_then(|s| s.as_ref()).map(|s| self.decode_str(s.name.as_ref()).into_owned()).unwrap_or_default();
-            eprintln!("compilar: {} ({} bytes) {:.1} ms (sala {})", name, src.as_ref().len(), el.as_secs_f64() * 1e3, self.room.id);
+            eprintln!("compilar: {} ({} bytes) {:.1} ms (reescribir {:.1} ms) (sala {})", name, src.as_ref().len(), el.as_secs_f64() * 1e3, t_rw.as_secs_f64() * 1e3, self.room.id);
         }
         if let Some(Some(s)) = self.assets.scripts.get(id) {
             let _ = s.compiled.set(code.clone());

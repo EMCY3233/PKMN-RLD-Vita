@@ -343,13 +343,36 @@ impl<'a> P<'a> {
         }
         self.number().map(Lit::Real)
     }
-    /// `if(argument0=N)return(V);` → (clave, valor)
-    fn entry(&mut self) -> Option<(f64, Lit)> {
+    /// identificador simple (variable): letras, dígitos y '_', sin empezar por dígito, y que no sea
+    /// una llamada, un índice de array ni un acceso con punto
+    fn ident(&mut self) -> Option<&'a [u8]> {
+        self.ws();
+        let start = self.i;
+        if !self.s.get(self.i).map_or(false, |c| c.is_ascii_alphabetic() || *c == b'_') {
+            return None
+        }
+        while self.s.get(self.i).map_or(false, |c| c.is_ascii_alphanumeric() || *c == b'_') {
+            self.i += 1;
+        }
+        let name = &self.s[start..self.i];
+        let save = self.i;
+        self.ws();
+        let next = self.s.get(self.i).copied();
+        self.i = save;
+        if matches!(next, Some(b'(' | b'[' | b'.')) || matches!(name, b"not" | b"and" | b"or" | b"xor" | b"div" | b"mod" | b"true" | b"false") {
+            self.i = start;
+            return None
+        }
+        Some(name)
+    }
+    /// `if(VAR=N)return(V);` → (variable, clave, valor)
+    fn entry(&mut self) -> Option<(&'a [u8], f64, Lit)> {
         let save = self.i;
         let r = (|| {
-            if !self.lit(b"if") || !self.lit(b"(") || !self.lit(b"argument0") {
+            if !self.lit(b"if") || !self.lit(b"(") {
                 return None
             }
+            let var = self.ident()?;
             if !self.lit(b"==") && !self.lit(b"=") {
                 return None
             }
@@ -386,7 +409,7 @@ impl<'a> P<'a> {
                     return None
                 }
             }
-            Some((key, v))
+            Some((var, key, v))
         })();
         if r.is_none() {
             self.i = save;
@@ -395,24 +418,97 @@ impl<'a> P<'a> {
     }
 }
 
-/// Sustituye los bloques de tabla de una script. Devuelve el código nuevo y cuántas tablas creó.
-pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
-    // descarte rápido: una cadena necesita al menos MIN_RUN comparaciones con argument0
-    {
-        let mut n = 0;
-        let mut rest = src;
-        while let Some(p) = rest.iter().position(|&c| c == b'a') {
-            rest = &rest[p + 1..];
-            if rest.starts_with(b"rgument0") {
-                n += 1;
-                if n >= MIN_RUN {
+fn word_start_at(src: &[u8], i: usize) -> bool {
+    i == 0 || !(src[i - 1].is_ascii_alphanumeric() || src[i - 1] == b'_')
+}
+
+/// `(V){case a: case b: ... CUERPO default: CUERPO2}` desde justo después de "switch".
+/// Devuelve (fin, variable, claves, cuerpo, cuerpo2).
+fn parse_switch_set(src: &[u8], at: usize) -> Option<(usize, String, Vec<f64>, &[u8], &[u8])> {
+    let mut p = P { s: src, i: at };
+    if !p.lit(b"(") {
+        return None
+    }
+    let var = p.ident()?;
+    if !p.lit(b")") || !p.lit(b"{") {
+        return None
+    }
+    let mut keys = Vec::new();
+    loop {
+        let save = p.i;
+        if p.lit(b"case") && src.get(p.i).map_or(false, |c| !c.is_ascii_alphanumeric() && *c != b'_') {
+            let k = p.number()?;
+            if !p.lit(b":") {
+                return None
+            }
+            keys.push(k);
+        } else {
+            p.i = save;
+            break
+        }
+    }
+    if keys.len() < MIN_RUN || !keys.iter().all(|k| k.fract() == 0.0 && k.abs() < 1e15) {
+        return None
+    }
+    // final del switch: llave de cierre correspondiente
+    let body_start = p.i;
+    let mut depth = 1;
+    let mut j = body_start;
+    while j < src.len() {
+        match src[j] {
+            b'"' | b'\'' => return None,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
                     break
                 }
-            }
+            },
+            _ => (),
         }
-        if n < MIN_RUN {
+        j += 1;
+    }
+    if depth != 0 {
+        return None
+    }
+    let inner = &src[body_start..j];
+    let has_word = |hay: &[u8], w: &[u8]| {
+        hay.windows(w.len()).enumerate().any(|(k, win)| {
+            win == w
+                && (k == 0 || !(hay[k - 1].is_ascii_alphanumeric() || hay[k - 1] == b'_'))
+                && hay.get(k + w.len()).map_or(true, |c| !c.is_ascii_alphanumeric() && *c != b'_')
+        })
+    };
+    // exactamente un default, al nivel del switch
+    let dpos = inner.windows(7).position(|w| w == b"default")?;
+    if inner[dpos + 7..].windows(7).any(|w| w == b"default") {
+        return None
+    }
+    let body = &inner[..dpos];
+    let mut q = P { s: inner, i: dpos + 7 };
+    if !q.lit(b":") {
+        return None
+    }
+    let body2 = &inner[q.i..];
+    for w in [&b"break"[..], b"continue", b"case", b"switch"] {
+        if has_word(inner, w) {
             return None
         }
+    }
+    // el default no puede estar dentro de un bloque del cuerpo
+    let opens = body.iter().filter(|&&c| c == b'{').count();
+    let closes = body.iter().filter(|&&c| c == b'}').count();
+    if opens != closes {
+        return None
+    }
+    Some((j + 1, String::from_utf8_lossy(var).into_owned(), keys, body, body2))
+}
+
+/// Sustituye los bloques de tabla de una script. Devuelve el código nuevo y cuántas tablas creó.
+pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
+    // descarte rápido: una tabla necesita al menos MIN_RUN comparaciones ('=' o 'case N:')
+    if src.len() < 200 || src.iter().filter(|&&c| c == b'=' || c == b':').take(MIN_RUN).count() < MIN_RUN {
+        return None
     }
     let mut out = Vec::with_capacity(src.len());
     let mut i = 0;
@@ -457,12 +553,25 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
             let mut p = P { s: src, i };
             let mut entries = Vec::new();
             let mut end = i;
-            while let Some(e) = p.entry() {
-                entries.push(e);
-                end = p.i;
+            let mut var: Option<&[u8]> = None;
+            loop {
+                let save = p.i;
+                match p.entry() {
+                    // todas las entradas del bloque comparan la misma variable
+                    Some((v, k, val)) if var.map_or(true, |w| w == v) => {
+                        var = Some(v);
+                        entries.push((k, val));
+                        end = p.i;
+                    },
+                    _ => {
+                        p.i = save;
+                        break
+                    },
+                }
             }
             let all_int = entries.iter().all(|(k, _)| k.fract() == 0.0 && k.abs() < 1e15);
             if entries.len() >= MIN_RUN && all_int {
+                let var = String::from_utf8_lossy(var.unwrap_or(b"argument0")).into_owned();
                 let mut map = std::collections::HashMap::new();
                 let first = entries[0].0;
                 for (k, v) in entries {
@@ -475,12 +584,81 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
                 };
                 out.extend_from_slice(&src[copied..i]);
                 out.extend_from_slice(
-                    format!("if(rld_lookup_has({id},argument0))return(rld_lookup({id},argument0)); ").as_bytes(),
+                    format!("if(rld_lookup_has({id},{var}))return(rld_lookup({id},{var})); ").as_bytes(),
                 );
                 copied = end;
                 i = end;
                 made += 1;
                 continue
+            }
+        }
+        // switch(V){case a: case b: ... CUERPO default: CUERPO2} con muchos casos que comparten un
+        // cuerpo (Ataque_MT, Ataque_Tutor) -> if(rld_lookup_has(t,V)){CUERPO}else{CUERPO2}.
+        // Solo si los cuerpos no tienen break/continue/case/switch (cambiarían de significado).
+        if word_start_at(src, i) && src[i..].starts_with(b"switch") && src.get(i + 6).map_or(false, |c| !c.is_ascii_alphanumeric() && *c != b'_') {
+            if let Some((end, var, keys, body, body2)) = parse_switch_set(src, i + 6) {
+                let first = keys[0];
+                let map: std::collections::HashMap<i64, Lit> = keys.into_iter().map(|k| (k as i64, Lit::Real(1.0))).collect();
+                let id = {
+                    let mut t = TABLES.lock().ok()?;
+                    t.push((map, first));
+                    t.len() - 1
+                };
+                out.extend_from_slice(&src[copied..i]);
+                out.extend_from_slice(format!("if(rld_lookup_has({id},{var})){{").as_bytes());
+                out.extend_from_slice(body);
+                out.extend_from_slice(b"}else{");
+                out.extend_from_slice(body2);
+                out.extend_from_slice(b"}");
+                copied = end;
+                i = end;
+                made += 1;
+                continue
+            }
+        }
+        // condición de if que es solo una cadena "V=a || V=b || ..." (misma variable, enteros):
+        // se cambia por rld_lookup_has(tabla, V). Ataque_DT/MT/Tutor tienen cientos así (1 MB de código)
+        let word_start = i == 0 || !(src[i - 1].is_ascii_alphanumeric() || src[i - 1] == b'_');
+        if word_start && src[i..].starts_with(b"if") && src.get(i + 2).map_or(false, |c| !c.is_ascii_alphanumeric() && *c != b'_') {
+            let mut p = P { s: src, i: i + 2 };
+            if p.lit(b"(") {
+                let cond_start = p.i;
+                let mut keys = Vec::new();
+                let mut var: Option<&[u8]> = None;
+                let ok = loop {
+                    let Some(v) = p.ident() else { break false };
+                    if var.map_or(false, |w| w != v) {
+                        break false
+                    }
+                    var = Some(v);
+                    if !p.lit(b"==") && !p.lit(b"=") {
+                        break false
+                    }
+                    let Some(k) = p.number() else { break false };
+                    keys.push(k);
+                    if p.lit(b"||") {
+                        continue
+                    }
+                    p.ws();
+                    break src.get(p.i) == Some(&b')')
+                };
+                if ok && keys.len() >= MIN_RUN && keys.iter().all(|k| k.fract() == 0.0 && k.abs() < 1e15) {
+                    let close = p.i;
+                    let var = String::from_utf8_lossy(var.unwrap()).into_owned();
+                    let first = keys[0];
+                    let map: std::collections::HashMap<i64, Lit> = keys.into_iter().map(|k| (k as i64, Lit::Real(1.0))).collect();
+                    let id = {
+                        let mut t = TABLES.lock().ok()?;
+                        t.push((map, first));
+                        t.len() - 1
+                    };
+                    out.extend_from_slice(&src[copied..cond_start]);
+                    out.extend_from_slice(format!("rld_lookup_has({id},{var})").as_bytes());
+                    copied = close;
+                    i = close;
+                    made += 1;
+                    continue
+                }
             }
         }
         i += 1;
@@ -667,7 +845,7 @@ impl crate::game::Game {
                 let mut i = 0;
                 while i < s.len() {
                     let mut p = P { s, i };
-                    if let Some((k, _)) = p.entry() {
+                    if let Some((_, k, _)) = p.entry() {
                         inputs.push(k.into());
                         i = p.i;
                     } else {
@@ -888,6 +1066,34 @@ mod tests {
         let (out, _) = rewrite_lookup_chains(s.as_bytes()).unwrap();
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("if(argument0=9)return(9); else x=1;"), "{out}");
+    }
+
+    #[test]
+    fn otra_variable_y_cadena_or() {
+        let mut s = String::from("var PK,NV; if(PK=1){");
+        for k in 0..9 {
+            s.push_str(&format!("if(NV={})return({});", k, k + 100));
+        }
+        s.push_str("return(0);} if(AT=3){if(PK=1 || PK=2 || PK=3 || PK=4 || PK=5 || PK=6 || PK=7 || PK=8 )return true;} if(PK=1 || NV=2 || PK=3 || PK=4 || PK=5 || PK=6 || PK=7 || PK=8)x=1;");
+        let (out, n) = rewrite_lookup_chains(s.as_bytes()).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(n, 2, "{out}");
+        assert!(out.contains("if(PK=1){if(rld_lookup_has("), "{out}");
+        assert!(out.contains(",NV))return(rld_lookup("), "{out}");
+        assert!(out.contains("{if(rld_lookup_has(") && out.contains(",PK))return true;}"), "{out}");
+        // variables mezcladas: no se toca
+        assert!(out.contains("if(PK=1 || NV=2"), "{out}");
+    }
+
+    #[test]
+    fn switch_de_muchos_casos() {
+        let s = "if(MK=194){switch(PK){case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: {return(true);exit;}default: return(false);}exit;} x=1; /* relleno para pasar del tamaño mínimo de 200 bytes ................................................ */";
+        let (out, n) = rewrite_lookup_chains(s.as_bytes()).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(n, 1);
+        assert!(out.contains(",PK)){ {return(true);exit;}}else{ return(false);}exit;}"), "{out}");
+        let s2 = "switch(PK){case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: x=1; break; default: y=2;}";
+        assert!(rewrite_lookup_chains(s2.as_bytes()).is_none());
     }
 
     #[test]
