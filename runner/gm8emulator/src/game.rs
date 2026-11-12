@@ -126,7 +126,7 @@ mod game_epoch_serde {
 
 /// Structure which contains all the components of a game.
 thread_local! {
-    static PERF_DRAW_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    pub static PERF_DRAW_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
     static PERF_PRESENT_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
 
@@ -139,6 +139,8 @@ pub struct Game {
     pub assets: Assets,
     pub event_holders: [crate::util::FastIndexMap<u32, Rc<RefCell<Vec<ID>>>>; 12],
     pub custom_draw_objects: HashSet<ID>,
+    /// Objetos cuyo paso solo calcula `visible` con InstanceInView: (sala en la que no hace nada, margen)
+    pub fast_visibility: crate::util::FastHashMap<ID, (Option<i32>, f64)>,
 
     pub renderer: Renderer,
     pub background_colour: Colour,
@@ -191,6 +193,10 @@ pub struct Game {
     /// Errores de ejecución: registrar y seguir (como "Ignorar" en GM8) en vez de cerrar el juego
     pub errors_continue: bool,
     pub errors_logged: u32,
+    /// primer error del juego desde el último cambio de sala del recorrido (RLD_GOTO_LIST)
+    pub tour_first_error: String,
+    /// rectángulo de la vista que se está dibujando (izq, arriba, der, abajo, proyección) para omitir lo que queda fuera
+    pub cull_rect: Option<(f64, f64, f64, f64, u64)>,
     pub uninit_args_are_zero: bool,
     pub swap_creation_events: bool,
 
@@ -1138,6 +1144,23 @@ impl Game {
             .collect::<Result<Vec<_>, _>>()?;
 
         crate::startlog("  launch: antes de objetos");
+        let mut fast_visibility: crate::util::FastHashMap<ID, (Option<i32>, f64)> = Default::default();
+        for (i, o) in objects.iter().enumerate() {
+            let Some(o) = o else { continue };
+            let Some(step) = o.events.get(ev::STEP).and_then(|e| e.iter().find(|(sub, _)| *sub == 0)).map(|(_, a)| a) else { continue };
+            if let [a] = step.as_slice() {
+                if a.id == 603 && a.applies_to == -1 && !a.is_condition && !a.invert_condition {
+                    if let Some(code) = a.param_strings.first() {
+                        if let Some(v) = crate::game::accel::visibility_step(code.0.as_ref(), &scripts) {
+                            fast_visibility.insert(i as ID, v);
+                        }
+                    }
+                }
+            }
+        }
+        if !fast_visibility.is_empty() {
+            crate::startlog(&format!("Acelerador: {} objetos con paso de visibilidad nativo", fast_visibility.len()));
+        }
         let objects = {
             let mut object_parents: Vec<Option<i32>> = Vec::with_capacity(objects.len());
             let mut objects = objects
@@ -1366,6 +1389,7 @@ impl Game {
             assets: Assets { backgrounds, fonts, objects, paths, rooms, scripts, sprites, sounds, timelines, triggers },
             event_holders,
             custom_draw_objects,
+            fast_visibility,
             particles: particle::Manager::new(particle_shapes),
             room: RoomState {
                 instance_list: InstanceList::new(),
@@ -1419,6 +1443,8 @@ impl Game {
                 || (!settings.always_abort && std::env::var_os("RLD_STRICT").is_none()),
             errors_continue: !settings.always_abort && std::env::var_os("RLD_STRICT").is_none(),
             errors_logged: 0,
+            tour_first_error: String::new(),
+            cull_rect: None,
             uninit_args_are_zero: !settings.error_on_uninitialized_args,
             swap_creation_events: settings.swap_creation_events,
             potential_step_settings: Default::default(),

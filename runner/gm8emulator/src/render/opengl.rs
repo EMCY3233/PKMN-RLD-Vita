@@ -205,6 +205,7 @@ pub struct RendererImpl {
     simple: Option<SimpleUniforms>,
     lazy: LazyTextures,
     stat_draws: u32,
+    proj_gen: u64,
     stat_binds: u32,
     stat_last_atlas: u32,
     /// textura de la barra de teclas en pantalla (cifras 5×7 + bloque blanco), creada al usarla
@@ -795,6 +796,7 @@ impl RendererImpl {
                 overlay_tex: 0,
                 overlay_tex_size: (1, 1),
                 stat_draws: 0,
+                proj_gen: 0,
                 stat_binds: 0,
                 stat_last_atlas: u32::MAX,
                 lazy: LazyTextures {
@@ -2460,6 +2462,10 @@ impl RendererTrait for RendererImpl {
         )
     }
 
+    fn proj_generation(&self) -> u64 {
+        self.proj_gen
+    }
+
     fn compact_textures(&mut self) {
         // Al cambiar de sala: si las páginas ocupan más de la mitad del presupuesto, se vacían todas y
         // lo que haga falta se vuelve a cargar al dibujarlo. Así los huecos de sprites borrados y lo de
@@ -2958,11 +2964,13 @@ impl RendererTrait for RendererImpl {
     }
 
     fn set_view_matrix(&mut self, view: [f32; 16]) {
+        self.proj_gen = self.proj_gen.wrapping_add(1);
         self.next_render_state.view_matrix = view;
         self.render_state_updated = true;
     }
 
     fn set_viewproj_matrix(&mut self, view: [f32; 16], proj: [f32; 16]) {
+        self.proj_gen = self.proj_gen.wrapping_add(1);
         self.next_render_state.view_matrix = view;
         self.next_render_state.proj_matrix = proj;
         self.render_state_updated = true;
@@ -2986,6 +2994,7 @@ impl RendererTrait for RendererImpl {
     }
 
     fn set_projection_ortho(&mut self, x: f64, y: f64, w: f64, h: f64, angle: f64) {
+        self.proj_gen = self.proj_gen.wrapping_add(1);
         #[rustfmt::skip]
         let proj_matrix: [f32; 16] = {
             // Squish to screen, flip vertically, and constrain z to range 1 - 32000
@@ -3001,6 +3010,7 @@ impl RendererTrait for RendererImpl {
     }
 
     fn set_projection_perspective(&mut self, x: f64, y: f64, w: f64, h: f64, angle: f64) {
+        self.proj_gen = self.proj_gen.wrapping_add(1);
         #[rustfmt::skip]
         let proj_matrix: [f32; 16] = {
             // Squish to screen, flip vertically, and constrain z to range 1 - 32000

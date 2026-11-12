@@ -112,6 +112,8 @@ impl<'a> LineIterator<'a> {
     }
 }
 
+const IDENTITY_MATRIX: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+
 impl Game {
     /// Draws all instances, tiles and backgrounds to the screen, taking all active views into account.
     /// Note that this function runs GML code associated with object draw events, so its usage must match GameMaker 8.
@@ -225,9 +227,44 @@ impl Game {
         Ok(())
     }
 
+    /// ¿Lo que ocupa (x0,y0)-(x1,y1) en la sala queda fuera de la vista que se está dibujando? Solo se
+    /// responde que sí cuando es seguro: vista sin girar, sin 3D, proyección sin cambiar desde set_view
+    /// y sin transformación de modelo (d3d_transform_*). Lo que queda fuera no se ve: omitirlo no cambia
+    /// la imagen y ahorra en salas con muchas instancias (Lago Senn: 1.536).
+    #[inline]
+    fn outside_view(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> bool {
+        match self.cull_rect {
+            Some((l, t, r, b, gen)) => {
+                (x1 < l || x0 > r || y1 < t || y0 > b)
+                    && self.renderer.proj_generation() == gen
+                    && !self.renderer.get_3d()
+                    && self.renderer.get_model_matrix() == IDENTITY_MATRIX
+            },
+            None => false,
+        }
+    }
+
     pub fn draw_instance_default(&mut self, idx: usize) -> gml::Result<()> {
         let instance = self.room.instance_list.get(idx);
         if let Some(sprite) = self.assets.sprites.get_asset(instance.sprite_index.get()) {
+            if self.cull_rect.is_some() {
+                let (xs, ys): (f64, f64) = (instance.image_xscale.get().into(), instance.image_yscale.get().into());
+                let (ix, iy): (f64, f64) = (instance.x.get().into(), instance.y.get().into());
+                let (ox, oy) = (f64::from(sprite.origin_x), f64::from(sprite.origin_y));
+                let (w, h) = (f64::from(sprite.width), f64::from(sprite.height));
+                let ang: f64 = instance.image_angle.get().into();
+                let (x0, x1) = { let a = -ox * xs; let b = (w - ox) * xs; (a.min(b), a.max(b)) };
+                let (y0, y1) = { let a = -oy * ys; let b = (h - oy) * ys; (a.min(b), a.max(b)) };
+                let (x0, y0, x1, y1) = if ang.rem_euclid(360.0) == 0.0 {
+                    (ix + x0, iy + y0, ix + x1, iy + y1)
+                } else {
+                    let r = x0.abs().max(x1.abs()).hypot(y0.abs().max(y1.abs()));
+                    (ix - r, iy - r, ix + r, iy + r)
+                };
+                if x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite() && self.outside_view(x0, y0, x1, y1) {
+                    return Ok(())
+                }
+            }
             if let Some(atlas_ref) = sprite.get_atlas_ref(instance.image_index.get().floor().to_i32()) {
                 self.renderer.draw_sprite(
                     atlas_ref,
@@ -259,7 +296,36 @@ impl Game {
         port_h: i32,
         angle: f64,
     ) -> gml::Result<()> {
+        let res = self.draw_view_inner(src_x, src_y, src_w, src_h, port_x, port_y, port_w, port_h, angle);
+        self.cull_rect = None;
+        res
+    }
+
+    fn draw_view_inner(
+        &mut self,
+        src_x: i32,
+        src_y: i32,
+        src_w: i32,
+        src_h: i32,
+        port_x: i32,
+        port_y: i32,
+        port_w: i32,
+        port_h: i32,
+        angle: f64,
+    ) -> gml::Result<()> {
         self.renderer.set_view(src_x, src_y, src_w, src_h, angle, port_x, port_y, port_w, port_h);
+        // RLD_NO_CULL=1 para comparar
+        self.cull_rect = if angle == 0.0 && !self.renderer.get_3d() && std::env::var_os("RLD_NO_CULL").is_none() {
+            Some((
+                f64::from(src_x) - 2.0,
+                f64::from(src_y) - 2.0,
+                f64::from(src_x + src_w) + 2.0,
+                f64::from(src_y + src_h) + 2.0,
+                self.renderer.proj_generation(),
+            ))
+        } else {
+            None
+        };
 
         if self.room.show_colour {
             self.renderer.clear_view(self.room.colour, 1.0);
@@ -287,6 +353,16 @@ impl Game {
         fn draw_tile(game: &mut Game, idx: usize) {
             let tile = game.room.tile_list.get(idx);
             if tile.visible.get() {
+                if game.cull_rect.is_some() {
+                    let (tx, ty): (f64, f64) = (tile.x.get().into(), tile.y.get().into());
+                    let (tw, th): (f64, f64) = (f64::from(tile.width.get()), f64::from(tile.height.get()));
+                    let (sx, sy): (f64, f64) = (tile.xscale.get().into(), tile.yscale.get().into());
+                    let (a, b) = (tx, tx + tw * sx);
+                    let (c, d) = (ty, ty + th * sy);
+                    if game.outside_view(a.min(b), c.min(d), a.max(b), c.max(d)) {
+                        return
+                    }
+                }
                 if let Some(Some(background)) = game.assets.backgrounds.get(tile.background_index.get() as usize) {
                     if let Some(atlas) = background.atlas_ref {
                         game.renderer.set_depth(tile.depth.get().into_inner() as f32);

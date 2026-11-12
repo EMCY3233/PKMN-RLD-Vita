@@ -650,6 +650,27 @@ impl Game {
                         *dest = self.eval(src, context)?;
                     }
 
+                    if self.bench.is_some() {
+                        // RLD_TRACE_SCRIPT=id,id…: apuntar las llamadas a esas scripts con sus argumentos
+                        static TRACE: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+                        let t = TRACE.get_or_init(|| {
+                            std::env::var("RLD_TRACE_SCRIPT").map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default()
+                        });
+                        if t.contains(script_id) {
+                            let stack = self.bench_stack_names();
+                            // RLD_TRACE_VARS=actual1,…: variables globales a mostrar en cada llamada trazada
+                            let mut vars = String::new();
+                            if let Ok(names) = std::env::var("RLD_TRACE_VARS") {
+                                for n in names.split(',') {
+                                    if let Some(id) = self.compiler.find_field_id(n.trim().as_bytes()) {
+                                        let v = self.globals.fields.get(&id).and_then(|f| f.get(0)).map(|v| format!("{:?}", v)).unwrap_or("-".into());
+                                        vars.push_str(&format!(" {}={}", n.trim(), v));
+                                    }
+                                }
+                            }
+                            eprintln!("traza: script {} sala {}{} | pila: {}", script_id, self.room.id, vars, stack);
+                        }
+                    }
                     let mut new_context = Context::copy_with_args(context, arg_values, args.len());
                     #[cfg(all(target_os = "vita", feature = "vitagl"))]
                     self.vita_ime_hook(*script_id, &new_context);

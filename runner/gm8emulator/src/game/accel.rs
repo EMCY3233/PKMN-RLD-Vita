@@ -1105,3 +1105,36 @@ pub fn special_chars(text: &[u8]) -> Vec<u8> {
     }
     t
 }
+
+
+// ===== Pasos que solo calculan la visibilidad =====
+
+/// Si el código de un evento es una sola llamada `Script();` a una script de la forma
+/// `[if(room=(R))exit;] visible=ex(I,x,y,N);` con I = InstanceInView original, devuelve (R, N).
+/// El agua, los árboles y las flores lo usan en su paso: en el Lago Senn son ~1.000 por fotograma.
+pub fn visibility_step(code: &[u8], scripts: &[Option<Box<Script>>]) -> Option<(Option<i32>, f64)> {
+    if !enabled() {
+        return None
+    }
+    let code = latin1(trim(code));
+    let name = code.strip_suffix("();")?;
+    if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        return None
+    }
+    let script = scripts.iter().flatten().find(|s| s.name.as_ref() == name.as_bytes())?;
+    let src = latin1(trim(script.source.as_ref()));
+    let re = regex_lite::Regex::new(r"^(?:if\(room=\((\d+)\)\)exit;\s*)?visible=ex\((\d+),x,y,(\d+)\);$").ok()?;
+    let c = re.captures(&src)?;
+    let room = match c.get(1) {
+        Some(m) => Some(m.as_str().parse().ok()?),
+        None => None,
+    };
+    let inview: usize = c[2].parse().ok()?;
+    let ok = scripts.get(inview).and_then(|s| s.as_ref()).is_some_and(|s| {
+        s.name.as_ref() == b"InstanceInView" && trim(s.source.as_ref()) == INVIEW_ORIGINAL
+    });
+    if !ok {
+        return None
+    }
+    Some((room, c[3].parse().ok()?))
+}

@@ -33,6 +33,27 @@ pub struct Bench {
     /// RLD_GOTO=<sala>: tras llegar a la casa (sala 10) saltar a esa sala (pruebas de minijuegos)
     goto: Option<i32>,
     home_frames: u64,
+    /// RLD_GOTO_LIST: recorrido por salas (ver bench_tour)
+    tour: Option<Tour>,
+}
+
+/// Recorrido automático por salas: tras cargar la partida (llegar a RLD_GOTO_FROM), salta a cada sala
+/// de RLD_GOTO_LIST, se queda RLD_GOTO_DWELL fotogramas (240) y apunta en tour.tsv instancias, tiempos,
+/// errores y una captura tour_<sala>.png
+pub struct Tour {
+    list: Vec<i32>,
+    idx: usize,
+    dwell: u64,
+    started: bool,
+    frames: u64,
+    sum_ms: f64,
+    worst_ms: f64,
+    draw_ns0: u64,
+    errors0: u32,
+    max_inst: usize,
+    last: Instant,
+    log: Option<File>,
+    target: i32,
 }
 
 /// Qué se está midiendo: una script (por id) o una función interna del motor (por dirección)
@@ -44,8 +65,43 @@ pub enum ProfKey {
     Event(i32, u16, u32),
 }
 
+/// Vigilante de cuelgues (RLD_HANG_TRACE): última script y último evento empezados, y fotograma actual
+pub static HANG_SCRIPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+pub static HANG_EVENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+pub static HANG_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn start_hang_watchdog() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let _ = std::thread::Builder::new().name("vigilante".into()).spawn(|| {
+        let mut last = (HANG_FRAME.load(Relaxed), Instant::now());
+        let mut reported = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let f = HANG_FRAME.load(Relaxed);
+            if f != last.0 {
+                last = (f, Instant::now());
+                reported = false;
+            } else if !reported && last.1.elapsed().as_secs() >= 10 {
+                reported = true;
+                let ev = HANG_EVENT.load(Relaxed);
+                eprintln!(
+                    "CUELGUE: fotograma {} sin terminar; último evento objeto {} tipo {} sub {}; última script {}",
+                    f, ev >> 32, (ev >> 16) & 0xffff, ev & 0xffff, HANG_SCRIPT.load(Relaxed)
+                );
+                let _ = std::fs::write(
+                    "tour_hang.txt",
+                    format!("obj {} ev {} sub {} script {}", ev >> 32, (ev >> 16) & 0xffff, ev & 0xffff, HANG_SCRIPT.load(Relaxed)),
+                );
+            }
+        }
+    });
+}
+
 impl Bench {
     pub fn new(max_frames: u64, log_path: &str) -> Self {
+        if std::env::var_os("RLD_HANG_TRACE").is_some() {
+            start_hang_watchdog();
+        }
         let now = Instant::now();
         let log = File::create(log_path).ok();
         let mut b = Self {
@@ -65,6 +121,21 @@ impl Bench {
             prof_all: std::env::var_os("RLD_PROFILE").is_some(),
             goto: std::env::var("RLD_GOTO").ok().and_then(|v| v.parse().ok()),
             home_frames: 0,
+            tour: std::env::var("RLD_GOTO_LIST").ok().map(|l| Tour {
+                list: l.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
+                idx: 0,
+                dwell: std::env::var("RLD_GOTO_DWELL").ok().and_then(|v| v.parse().ok()).unwrap_or(240),
+                started: false,
+                frames: 0,
+                sum_ms: 0.0,
+                worst_ms: 0.0,
+                draw_ns0: 0,
+                errors0: 0,
+                max_inst: 0,
+                last: now,
+                log: std::fs::OpenOptions::new().create(true).append(true).open("tour.tsv").ok(),
+                target: -1,
+            }),
         };
         b.line(&format!("Benchmark del runner - plataforma: {} - {} fotogramas", std::env::consts::OS, max_frames));
         b.line("seg_real | fotogramas | FPS | peor_fotograma_ms | sala | instancias");
@@ -112,6 +183,7 @@ impl Game {
     /// Entrada en una script (solo cuenta en modo benchmark)
     pub fn bench_enter(&mut self, id: usize) {
         if let Some(b) = self.bench.as_mut() {
+            HANG_SCRIPT.store(id as u64, std::sync::atomic::Ordering::Relaxed);
             b.prof_stack.push((ProfKey::Script(id), Instant::now(), 0.0));
         }
     }
@@ -161,6 +233,16 @@ impl Game {
         }
         b.polls += 1;
         let frame = b.polls;
+        // recorrido por salas: pulsar una tecla de vez en cuando para que avancen los diálogos de las escenas
+        // (RLD_TOUR_KEY: código de tecla; por defecto X = cancelar, que no acepta opciones)
+        if b.tour.as_ref().map_or(false, |t| t.started) {
+            let k = std::env::var("RLD_TOUR_KEY").ok().and_then(|v| v.parse().ok()).unwrap_or(0x58u8);
+            match frame % 20 {
+                0 => self.pending_keys.push((k, true)),
+                2 => self.pending_keys.push((k, false)),
+                _ => (),
+            }
+        }
         // RLD_KEYS=sondeo:vk:1|0,… y RLD_SHOTS_P=sondeo,…: pulsaciones y capturas en sondeos de
         // teclado concretos (también dentro de bucles modales); RLD_MANUAL=1: sin pulsaciones
         // automáticas. Para reproducir casos concretos en PC.
@@ -211,6 +293,7 @@ impl Game {
     /// Se llama una vez por fotograma desde `run()`. Devuelve true cuando hay que terminar.
     pub fn bench_tick(&mut self) -> bool {
         let Some(mut b) = self.bench.take() else { return false };
+        HANG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // RLD_SHOTS=1600,2000: guardar capturas shot_<fotograma>.png (comparar renderizadores)
         if let Ok(list) = std::env::var("RLD_SHOTS") {
             if list.split(',').any(|f| f.trim().parse::<u64>().ok() == Some(b.frame)) {
@@ -259,8 +342,17 @@ impl Game {
                 b.line(&format!("   {}", vs.join(", ")));
             }
         }
+        if let Some(mut t) = b.tour.take() {
+            let keep = self.bench_tour(&mut t);
+            b.tour = Some(t);
+            if !keep {
+                b.max_frames = b.frame + 1;
+            }
+        }
         if let Some(target) = b.goto {
-            if self.room.id == 10 {
+            // RLD_GOTO_FROM=<sala>: desde qué sala saltar (por defecto la casa, 10)
+            let from = std::env::var("RLD_GOTO_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+            if self.room.id == from {
                 b.home_frames += 1;
                 if b.home_frames == 90 {
                     b.line(&format!("-> RLD_GOTO: saltando a la sala {}", target));
@@ -312,5 +404,115 @@ impl Game {
         }
         self.bench = Some(b);
         done
+    }
+}
+
+impl Game {
+    /// Un fotograma del recorrido por salas. Devuelve false cuando ha terminado.
+    fn bench_tour(&mut self, t: &mut Tour) -> bool {
+        let now = Instant::now();
+        let ms = now.duration_since(t.last).as_secs_f64() * 1000.0;
+        t.last = now;
+        if !t.started {
+            let from = std::env::var("RLD_GOTO_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+            if self.room.id != from {
+                return true
+            }
+            t.frames += 1;
+            if t.frames < 60 {
+                return true
+            }
+            t.started = true;
+            t.frames = 0;
+            return self.tour_next(t)
+        }
+        t.frames += 1;
+        // los primeros fotogramas tras el salto (carga de la sala) no cuentan para la media
+        if t.frames > 10 {
+            t.sum_ms += ms;
+            t.worst_ms = t.worst_ms.max(ms);
+        } else if t.frames == 10 {
+            t.draw_ns0 = crate::game::PERF_DRAW_NS.with(|c| c.get());
+        }
+        t.max_inst = t.max_inst.max(self.room.instance_list.count_all());
+        if t.frames == t.dwell / 2 {
+            self.renderer.flush_queue();
+            let (w, h) = (self.unscaled_width, self.unscaled_height);
+            let rgba = self.renderer.get_pixels(0, 0, w as _, h as _);
+            if let Some(img) = image::RgbaImage::from_vec(w, h, rgba.into()) {
+                let _ = img.save(format!("tour_{}.png", t.target));
+            }
+        }
+        if t.frames >= t.dwell {
+            let n = (t.frames - 10).max(1) as f64;
+            let draw = (crate::game::PERF_DRAW_NS.with(|c| c.get()) - t.draw_ns0) as f64 / 1e6 / n;
+            let name = self.assets.rooms.get_asset(t.target).map(|r| self.decode_str(r.name.as_ref()).into_owned()).unwrap_or_default();
+            let line = format!(
+                "{}\t{}\t{}\t{}\t{:.2}\t{:.1}\t{:.2}\t{}\t{}",
+                t.target, name, self.room.id, t.max_inst, t.sum_ms / n, t.worst_ms, draw,
+                self.errors_logged - t.errors0, self.tour_first_error
+            );
+            if let Some(f) = t.log.as_mut() {
+                let _ = writeln!(f, "{}", line);
+                let _ = f.flush();
+            }
+            return self.tour_next(t)
+        }
+        true
+    }
+
+    fn tour_next(&mut self, t: &mut Tour) -> bool {
+        let Some(&target) = t.list.get(t.idx) else {
+            t.frames = 0;
+            t.dwell = u64::MAX;
+            return false
+        };
+        t.idx += 1;
+        t.target = target;
+        t.frames = 0;
+        t.sum_ms = 0.0;
+        t.worst_ms = 0.0;
+        t.max_inst = 0;
+        t.errors0 = self.errors_logged;
+        self.tour_first_error.clear();
+        let _ = std::fs::write("tour_cur.txt", target.to_string());
+        // Viaje como una puerta del juego (script DoorEnter): punto de aparición de tour_spawns.txt
+        // ("sala x y" por línea); si no hay, salto directo a la sala
+        let spawn = std::fs::read_to_string("tour_spawns.txt").ok().and_then(|txt| {
+            txt.lines().find_map(|l| {
+                let v: Vec<i32> = l.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                (v.len() == 3 && v[0] == target).then(|| (v[1], v[2]))
+            })
+        });
+        // sin punto conocido: el centro de la sala (fuera de los límites el juego hace perder el conocimiento)
+        let spawn = spawn.or_else(|| self.assets.rooms.get_asset(target).map(|r| (r.width as i32 / 2, r.height as i32 / 2)));
+        match spawn {
+            Some((x, y)) => {
+                let code = format!(
+                    "with((14)){{ global.room_out=room; global.xx={x}; global.yy={y}; global.index_place=0; global.ciclista=false; ex(5171); global.mira=(14).mira; global.lugar={target}; room=global.lugar; }}"
+                );
+                let dummy = self
+                    .room
+                    .instance_list
+                    .insert_dummy(crate::instance::Instance::new_dummy(self.assets.objects.get_asset(0).map(|x| x.as_ref())));
+                let mut ctx = crate::gml::Context::with_single_instance(dummy);
+                let r = self.execute_string(&mut ctx, &[crate::gml::Value::from(code)]);
+                self.room.instance_list.remove_dummy(dummy);
+                if r.is_err() || self.scene_change.is_none() {
+                    self.scene_change = Some(crate::game::SceneChange::Room(target));
+                }
+            },
+            None => self.scene_change = Some(crate::game::SceneChange::Room(target)),
+        }
+        true
+    }
+}
+
+impl Game {
+    /// Nombres de las scripts en curso (pila del perfilador del benchmark), de fuera a dentro
+    pub fn bench_stack_names(&self) -> String {
+        let Some(b) = self.bench.as_ref() else { return String::new() };
+        let ks: Vec<ProfKey> = b.prof_stack.iter().map(|x| x.0).collect();
+        ks.iter().map(|k| self.prof_name(*k)).collect::<Vec<_>>().join(" > ")
     }
 }

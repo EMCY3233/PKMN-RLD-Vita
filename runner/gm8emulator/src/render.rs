@@ -303,6 +303,11 @@ pub trait RendererTrait {
     /// Reorganiza las texturas diferidas al cambiar de sala
     fn compact_textures(&mut self) {}
 
+    /// Contador de cambios de proyección/vista (para saber si el rectángulo de la vista sigue valiendo)
+    fn proj_generation(&self) -> u64 {
+        u64::MAX
+    }
+
     /// Cambia el origen (en píxeles) de una textura de sprite. GM8 lo aplica al dibujar; OpenGMK
     /// guardaba el origen solo en el recurso y el dibujo seguía usando el de la carga
     /// (sprite_set_offset no tenía efecto visible).
@@ -710,6 +715,10 @@ impl Renderer {
 
     pub fn compact_textures(&mut self) {
         self.0.compact_textures()
+    }
+
+    pub fn proj_generation(&self) -> u64 {
+        self.0.proj_generation()
     }
 
     pub fn check_texture_id(&self, id: i32) -> bool {

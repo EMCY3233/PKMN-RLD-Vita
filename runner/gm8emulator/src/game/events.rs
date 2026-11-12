@@ -77,6 +77,24 @@ impl Game {
                 }
             };
 
+            // paso que solo calcula la visibilidad (game::accel::visibility_step): nativo
+            if event_id == gml::ev::STEP && event_sub == 0 {
+                if let Some(&(skip_room, margin)) = self.fast_visibility.get(&object_id) {
+                    if skip_room != Some(self.room.id) {
+                        let inst = self.room.instance_list.get(instance);
+                        let (x, y): (gml::Value, gml::Value) = (inst.x.get().into(), inst.y.get().into());
+                        let v = self.rld_in_view(&[x, y, gml::Value::Real(margin.into())])?;
+                        self.room.instance_list.get(instance).visible.set(v.is_truthy());
+                    }
+                    return Ok(())
+                }
+            }
+            if self.bench.is_some() {
+                crate::game::bench::HANG_EVENT.store(
+                    ((object_id as u64) << 32) | ((event_id as u64 & 0xffff) << 16) | (event_sub as u64 & 0xffff),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
             let prof = self.bench_enter_event(object_id, event_id, event_sub);
             let res = self.execute_tree(event, instance, other, event_id, event_sub as _, object_id);
             if prof {
@@ -87,6 +105,10 @@ impl Game {
                     // GM8 (sin "Abortar en todos los errores") muestra el error y deja seguir: aquí se
                     // apunta en runner.log y se abandona solo este evento.
                     self.errors_logged += 1;
+                    if self.tour_first_error.is_empty() {
+                        let obj = self.assets.objects.get_asset(object_id).map(|o| self.decode_str(o.name.as_ref()).into_owned()).unwrap_or_default();
+                        self.tour_first_error = format!("{} ev{}/{}: {}", obj, event_id, event_sub, e).chars().take(160).collect();
+                    }
                     if self.errors_logged <= 200 {
                         let obj = self
                             .assets
