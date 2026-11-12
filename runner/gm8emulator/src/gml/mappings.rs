@@ -848,7 +848,9 @@ pub const INSTANCE_VARIABLES: [(&str, InstanceVariable); 166] = [
 
 #[inline(always)]
 pub fn get_instance_variable_by_name(name: &[u8]) -> Option<&InstanceVariable> {
-    std::str::from_utf8(name).ok().and_then(|n| INSTANCE_VARIABLES.iter().find(|(s, _)| *s == n).map(|(_, v)| v))
+    // tabla hash en vez de recorrer los 166 nombres (el compilador lo consulta en cada identificador)
+    static MAP: std::sync::OnceLock<crate::util::FastHashMap<&'static [u8], &'static InstanceVariable>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| INSTANCE_VARIABLES.iter().map(|(s, v)| (s.as_bytes(), v)).collect()).get(name).copied()
 }
 
 /// Mappings of GM function names to callable pointers

@@ -47,11 +47,16 @@ impl Mp3Player {
         if let Some((channels, sample_rate)) = details(Decoder::new(&file)) {
             let mut length = 0;
             let mut decoder = Decoder::new(&file);
-            while let Some(frame) = decoder.next() {
+            // Solo cabeceras (peek + skip), sin decodificar: decodificar el MP3 entero para medirlo
+            // costaba ~90 ms en PC (más de un segundo en la Vita) en el hilo del juego.
+            while let Some(frame) = decoder.peek() {
                 if let Frame::Audio(audio) = frame {
                     if audio.channels() == channels {
                         length += audio.sample_count();
                     }
+                }
+                if decoder.skip().is_none() {
+                    break
                 }
             }
 

@@ -133,6 +133,7 @@ impl AudioManager {
                 .expect("Failed to open FFmpeg stdin")
         });
 
+        udon::resampler::prewarm(sample_rate);
         if capture_audio {
             std::thread::spawn(move || {
                 let stream = session.open_output_stream(device).unwrap();

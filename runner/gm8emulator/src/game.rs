@@ -20,6 +20,7 @@ pub mod surface;
 pub mod transition;
 pub mod view;
 pub mod keymap;
+pub mod hot;
 pub mod pages;
 #[cfg(all(target_os = "vita", feature = "vitagl"))]
 pub mod vita_input;
@@ -127,6 +128,8 @@ mod game_epoch_serde {
 /// Structure which contains all the components of a game.
 thread_local! {
     pub static PERF_DRAW_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    /// tiempo gastado compilando scripts (compilación diferida)
+    pub static COMPILE_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
     static PERF_PRESENT_NS: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
 
@@ -195,6 +198,8 @@ pub struct Game {
     pub errors_logged: u32,
     /// primer error del juego desde el último cambio de sala del recorrido (RLD_GOTO_LIST)
     pub tour_first_error: String,
+    /// scripts pesadas que se compilan al entrar en la sala (game/hot.rs)
+    pub hot: hot::HotScripts,
     /// rectángulo de la vista que se está dibujando (izq, arriba, der, abajo, proyección) para omitir lo que queda fuera
     pub cull_rect: Option<(f64, f64, f64, f64, u64)>,
     pub uninit_args_are_zero: bool,
@@ -1444,6 +1449,7 @@ impl Game {
             errors_continue: !settings.always_abort && std::env::var_os("RLD_STRICT").is_none(),
             errors_logged: 0,
             tour_first_error: String::new(),
+            hot: Default::default(),
             cull_rect: None,
             uninit_args_are_zero: !settings.error_on_uninitialized_args,
             swap_creation_events: settings.swap_creation_events,
@@ -1688,6 +1694,7 @@ impl Game {
 
     pub fn load_room(&mut self, room_id: i32) -> Result<(), Box<dyn std::error::Error>> {
         self.renderer.compact_textures();
+        self.hot_prewarm(room_id);
         let (room, room_state, is_stored) = if let Some(room) = self.assets.rooms.get_asset(room_id) {
             if let Some(p) = self.stored_rooms.iter().position(|x| x.id == room_id) {
                 (room.clone(), self.stored_rooms.remove(p), true)
@@ -3345,11 +3352,19 @@ impl Game {
             },
             _ => return Err(gml::Error::NonexistentAsset(asset::Type::Script, id as i32)),
         };
+        let t0 = Instant::now();
         let src = crate::game::accel::rewrite_script(&self.assets.scripts, id, src);
         let code = self
             .compiler
             .compile(src.as_ref())
             .map_err(|e| gml::Error::FunctionError("script".into(), e.message))?;
+        let el = t0.elapsed();
+        COMPILE_NS.with(|c| c.set(c.get() + el.as_nanos() as u64));
+        self.hot_note_compile(id, el.as_secs_f64() * 1e3);
+        if el.as_millis() >= 2 && std::env::var_os("RLD_DEBUG_COMPILE").is_some() {
+            let name = self.assets.scripts.get(id).and_then(|s| s.as_ref()).map(|s| self.decode_str(s.name.as_ref()).into_owned()).unwrap_or_default();
+            eprintln!("compilar: {} ({} bytes) {:.1} ms (sala {})", name, src.as_ref().len(), el.as_secs_f64() * 1e3, self.room.id);
+        }
         if let Some(Some(s)) = self.assets.scripts.get(id) {
             let _ = s.compiled.set(code.clone());
         }

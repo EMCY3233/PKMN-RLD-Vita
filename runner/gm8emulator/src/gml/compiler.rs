@@ -29,7 +29,7 @@ pub struct Compiler {
     fields: Vec<Box<[u8]>>,
 
     /// Índice nombre → id de `fields` (la búsqueda lineal costaba mucho con los miles de variables del juego)
-    field_index: HashMap<Box<[u8]>, usize>,
+    field_index: crate::util::FastHashMap<Box<[u8]>, usize>,
 
     /// Acelerador del port: id de la script despachadora `ex` de Pokémon Reloaded, si es exactamente
     /// `return script_execute(argument0,...,argument15);`. Entonces `ex(N, ...)` con N constante se
@@ -46,7 +46,7 @@ impl Compiler {
             script_names: HashMap::new(),
             extension_fn_names: HashMap::new(),
             fields: Vec::new(),
-            field_index: HashMap::new(),
+            field_index: Default::default(),
             inline_ex: None,
         }
     }

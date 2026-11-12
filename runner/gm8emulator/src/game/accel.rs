@@ -397,6 +397,23 @@ impl<'a> P<'a> {
 
 /// Sustituye los bloques de tabla de una script. Devuelve el código nuevo y cuántas tablas creó.
 pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
+    // descarte rápido: una cadena necesita al menos MIN_RUN comparaciones con argument0
+    {
+        let mut n = 0;
+        let mut rest = src;
+        while let Some(p) = rest.iter().position(|&c| c == b'a') {
+            rest = &rest[p + 1..];
+            if rest.starts_with(b"rgument0") {
+                n += 1;
+                if n >= MIN_RUN {
+                    break
+                }
+            }
+        }
+        if n < MIN_RUN {
+            return None
+        }
+    }
     let mut out = Vec::with_capacity(src.len());
     let mut i = 0;
     let mut made = 0;

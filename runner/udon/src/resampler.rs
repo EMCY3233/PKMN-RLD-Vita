@@ -297,3 +297,22 @@ impl<S> Resampler<S> where S: Source {
         }
     }
 }
+
+/// Calcula de antemano, en un hilo aparte, las tablas del filtro para las frecuencias habituales
+/// (8000-48000 Hz -> `dest_rate`), para que el primer sonido de cada frecuencia no se retrase.
+pub fn prewarm(dest_rate: SampleRate) {
+    struct Silence(SampleRate);
+    impl Source for Silence {
+        fn channel_count(&self) -> ChannelCount { ChannelCount::new(1).unwrap() }
+        fn sample_rate(&self) -> SampleRate { self.0 }
+        fn write_samples(&mut self, _buffer: &mut [Sample]) -> usize { 0 }
+        fn reset(&mut self) {}
+    }
+    let _ = std::thread::Builder::new().name("rld-resampler".into()).spawn(move || {
+        for rate in [22050u32, 44100, 11025, 16000, 32000, 8000, 24000, 12000, 48000] {
+            if rate != dest_rate.get() {
+                let _ = Resampler::new(Silence(SampleRate::new(rate).unwrap()), dest_rate);
+            }
+        }
+    });
+}

@@ -294,6 +294,23 @@ impl Game {
     pub fn bench_tick(&mut self) -> bool {
         let Some(mut b) = self.bench.take() else { return false };
         HANG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // RLD_PRECOMPILE=1: en el fotograma 5, compilar todas las scripts y medir tiempo y memoria
+        if b.frame == 5 && std::env::var_os("RLD_PRECOMPILE").is_some() {
+            let rss = || std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok())).unwrap_or(0) * 4096 / 1048576;
+            let (m0, t0) = (rss(), Instant::now());
+            let (mut n, mut bytes) = (0, 0usize);
+            for id in 0..self.assets.scripts.len() {
+                if let Some(Some(sc)) = self.assets.scripts.get(id) {
+                    if sc.compiled.get().is_none() {
+                        bytes += sc.source.as_ref().len();
+                        if self.script_code(id).is_ok() {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            b.line(&format!("precompilado: {} scripts, {} KB de código, {:.0} ms, memoria {} -> {} MB", n, bytes / 1024, t0.elapsed().as_secs_f64() * 1e3, m0, rss()));
+        }
         // RLD_SHOTS=1600,2000: guardar capturas shot_<fotograma>.png (comparar renderizadores)
         if let Ok(list) = std::env::var("RLD_SHOTS") {
             if list.split(',').any(|f| f.trim().parse::<u64>().ok() == Some(b.frame)) {
