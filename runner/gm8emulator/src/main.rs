@@ -6,6 +6,7 @@ mod asset;
 mod game;
 mod gml;
 mod handleman;
+mod hitch;
 #[cfg(feature = "desktop")]
 mod imgui_key_utils;
 #[cfg(feature = "desktop")]

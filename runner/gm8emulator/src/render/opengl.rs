@@ -890,7 +890,11 @@ impl RendererImpl {
             return
         }
         let Some(mut provider) = self.lazy.provider.take() else { return };
+        let t_load = std::time::Instant::now();
         let loaded = provider(atlas_ref);
+        let ns = t_load.elapsed().as_nanos() as u64;
+        crate::hitch::add_load_ns(ns);
+        crate::hitch::note("cargar textura", ns as f64 / 1e6);
         self.lazy.provider = Some(provider);
         self.lazy.loads += 1;
         for (r, pixels) in loaded {
@@ -1385,7 +1389,8 @@ impl RendererImpl {
             }
 
             self.stat_draws += 1;
-            if let Some(from) = std::env::var("RLD_DEBUG_BINDS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            static DBG_BINDS: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+            if let Some(from) = *DBG_BINDS.get_or_init(|| std::env::var("RLD_DEBUG_BINDS").ok().and_then(|v| v.parse::<u64>().ok())) {
                 static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n >= from && n < from + 60 {

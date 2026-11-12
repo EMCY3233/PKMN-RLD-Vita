@@ -1,3 +1,8 @@
+thread_local! {
+    /// (ns en eventos de dibujo del juego, instancias con evento propio, instancias por defecto)
+    pub static DRAW_STATS: std::cell::Cell<(u64, u64, u64)> = std::cell::Cell::new((0, 0, 0));
+}
+
 use crate::{
     asset::{self, font, Font},
     game::{Game, GetAsset, PlayType, Version},
@@ -339,10 +344,20 @@ impl Game {
                 game.renderer.set_depth(instance.depth.get().into_inner() as f32);
                 if game.custom_draw_objects.contains(&instance.object_index.get()) {
                     // Custom draw event
-                    game.run_instance_event(gml::ev::DRAW, 0, idx, idx, None)
+                    let t = std::time::Instant::now();
+                    let r = game.run_instance_event(gml::ev::DRAW, 0, idx, idx, None);
+                    DRAW_STATS.with(|c| {
+                        let (ns, n, d) = c.get();
+                        c.set((ns + t.elapsed().as_nanos() as u64, n + 1, d));
+                    });
+                    r
                 } else {
                     // Default draw action
                     let _ = game.draw_instance_default(idx);
+                    DRAW_STATS.with(|c| {
+                        let (ns, n, d) = c.get();
+                        c.set((ns, n, d + 1));
+                    });
                     Ok(())
                 }
             } else {

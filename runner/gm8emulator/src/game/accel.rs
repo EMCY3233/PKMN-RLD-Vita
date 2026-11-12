@@ -50,7 +50,8 @@ pub fn rewrite_script(scripts: &[Option<Box<Script>>], id: usize, src: gml::Stri
         None => src,
     };
     let Some(Some(script)) = scripts.get(id) else { return src };
-    let src = match rewrite_lookup_chains(src.as_ref()) {
+    // GetBattleEffect tiene su propia aceleración (salida rápida) que comprueba el texto original
+    let src = match if script.name.as_ref() == b"GetBattleEffect" { None } else { rewrite_lookup_chains(src.as_ref()) } {
         Some((new, n)) => {
             crate::startlog(&format!(
                 "Acelerador: {} -> {} tabla(s) nativa(s)",
@@ -251,7 +252,7 @@ pub enum Lit {
 
 /// Por tabla: (entradas, primera clave del bloque original). La primera clave hace falta para
 /// reproducir el error de GM8 al comparar un texto con un número.
-static TABLES: std::sync::Mutex<Vec<(std::collections::HashMap<i64, Lit>, f64)>> = std::sync::Mutex::new(Vec::new());
+static TABLES: std::sync::Mutex<Vec<(crate::util::FastHashMap<i64, Lit>, f64)>> = std::sync::Mutex::new(Vec::new());
 
 pub fn first_key(table: usize) -> Option<f64> {
     TABLES.lock().ok()?.get(table).map(|t| t.1)
@@ -572,7 +573,7 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
             let all_int = entries.iter().all(|(k, _)| k.fract() == 0.0 && k.abs() < 1e15);
             if entries.len() >= MIN_RUN && all_int {
                 let var = String::from_utf8_lossy(var.unwrap_or(b"argument0")).into_owned();
-                let mut map = std::collections::HashMap::new();
+                let mut map = crate::util::FastHashMap::default();
                 let first = entries[0].0;
                 for (k, v) in entries {
                     map.entry(k as i64).or_insert(v); // gana la primera aparición
@@ -598,7 +599,7 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
         if word_start_at(src, i) && src[i..].starts_with(b"switch") && src.get(i + 6).map_or(false, |c| !c.is_ascii_alphanumeric() && *c != b'_') {
             if let Some((end, var, keys, body, body2)) = parse_switch_set(src, i + 6) {
                 let first = keys[0];
-                let map: std::collections::HashMap<i64, Lit> = keys.into_iter().map(|k| (k as i64, Lit::Real(1.0))).collect();
+                let map: crate::util::FastHashMap<i64, Lit> = keys.into_iter().map(|k| (k as i64, Lit::Real(1.0))).collect();
                 let id = {
                     let mut t = TABLES.lock().ok()?;
                     t.push((map, first));
@@ -625,18 +626,65 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
                 let cond_start = p.i;
                 let mut keys = Vec::new();
                 let mut var: Option<&[u8]> = None;
+                // negated: "V!=a && V!=b && ..." (V no está en el conjunto)
+                let mut negated: Option<bool> = None;
+                // rangos "(V>=a && V<=b)" dentro de una cadena con ||: se dejan tal cual
+                let mut ranges: Vec<&[u8]> = Vec::new();
                 let ok = loop {
+                    if negated != Some(true) {
+                        let save = p.i;
+                        p.ws();
+                        let rs = p.i;
+                        let is_range = (|| {
+                            if !p.lit(b"(") {
+                                return false
+                            }
+                            let Some(a) = p.ident() else { return false };
+                            if !p.lit(b">=") || p.number().is_none() || !p.lit(b"&&") {
+                                return false
+                            }
+                            let Some(b) = p.ident() else { return false };
+                            if a != b || var.map_or(false, |w| w != a) || !p.lit(b"<=") || p.number().is_none() || !p.lit(b")") {
+                                return false
+                            }
+                            var = Some(a);
+                            true
+                        })();
+                        if is_range {
+                            ranges.push(&src[rs..p.i]);
+                            negated = Some(false);
+                            if p.lit(b"||") {
+                                continue
+                            }
+                            p.ws();
+                            break src.get(p.i) == Some(&b')')
+                        }
+                        p.i = save;
+                    }
                     let Some(v) = p.ident() else { break false };
                     if var.map_or(false, |w| w != v) {
                         break false
                     }
                     var = Some(v);
-                    if !p.lit(b"==") && !p.lit(b"=") {
+                    let neg = if p.lit(b"!=") || p.lit(b"<>") {
+                        true
+                    } else if p.lit(b"==") || p.lit(b"=") {
+                        false
+                    } else {
+                        break false
+                    };
+                    if negated.map_or(false, |n| n != neg) {
                         break false
                     }
+                    negated = Some(neg);
+                    // número, opcionalmente entre paréntesis: "(16)"
+                    let paren = p.lit(b"(");
                     let Some(k) = p.number() else { break false };
+                    if paren && !p.lit(b")") {
+                        break false
+                    }
                     keys.push(k);
-                    if p.lit(b"||") {
+                    if (!neg && p.lit(b"||")) || (neg && p.lit(b"&&")) {
                         continue
                     }
                     p.ws();
@@ -646,14 +694,23 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
                     let close = p.i;
                     let var = String::from_utf8_lossy(var.unwrap()).into_owned();
                     let first = keys[0];
-                    let map: std::collections::HashMap<i64, Lit> = keys.into_iter().map(|k| (k as i64, Lit::Real(1.0))).collect();
+                    let map: crate::util::FastHashMap<i64, Lit> = keys.into_iter().map(|k| (k as i64, Lit::Real(1.0))).collect();
                     let id = {
                         let mut t = TABLES.lock().ok()?;
                         t.push((map, first));
                         t.len() - 1
                     };
                     out.extend_from_slice(&src[copied..cond_start]);
-                    out.extend_from_slice(format!("rld_lookup_has({id},{var})").as_bytes());
+                    let not = if negated == Some(true) { "!" } else { "" };
+                    if ranges.is_empty() {
+                        out.extend_from_slice(format!("{not}rld_lookup_has({id},{var})").as_bytes());
+                    } else {
+                        out.extend_from_slice(format!("rld_lookup_has({id},{var})").as_bytes());
+                        for r in &ranges {
+                            out.extend_from_slice(b" || ");
+                            out.extend_from_slice(r);
+                        }
+                    }
                     copied = close;
                     i = close;
                     made += 1;
@@ -1083,6 +1140,16 @@ mod tests {
         assert!(out.contains("{if(rld_lookup_has(") && out.contains(",PK))return true;}"), "{out}");
         // variables mezcladas: no se toca
         assert!(out.contains("if(PK=1 || NV=2"), "{out}");
+        let s2 = "if(previo=(9543)){if(clase!=(7) && clase!=(9) && clase!=(12) && clase!=(13) && clase!=(14) && clase!=(16) && clase!=(17) && clase!=(18))res=false;} /* relleno ......................................................................... */";
+        let (out, n) = rewrite_lookup_chains(s2.as_bytes()).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(n, 1, "{out}");
+        assert!(out.contains("{if(!rld_lookup_has(") && out.contains(",clase))res=false;}"), "{out}");
+        let s3 = "if(PK=6 || PK=12 || PK=820 || (PK>=15 && PK<=18) || PK=21 || PK=22 || PK=41 || PK=42 || PK=49)return true; /* relleno .................................................................................... */";
+        let (out, n) = rewrite_lookup_chains(s3.as_bytes()).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(n, 1, "{out}");
+        assert!(out.contains(",PK) || (PK>=15 && PK<=18))return true;"), "{out}");
     }
 
     #[test]
@@ -1121,17 +1188,81 @@ impl crate::game::Game {
     pub fn rld_secpk2_sum(&mut self, args: &[gml::Value]) -> gml::Result<gml::Value> {
         use gml::Value;
         use crate::game::Game;
+        // Nombres de las variables globales que suma. Sus ids de campo se buscan una vez y se guardan
+        // (antes ~300 búsquedas por nombre y ~100 format! por llamada: 25 µs en PC, ~1,5 ms en la
+        // Vita, y el combate la llama ~12 veces por fotograma)
+        const NAMES: [&str; 42] = [
+            "PP_1", "PS_1", "STD1", "IV", "objpoke1", "selue_pk1", "pkmnsex1",
+            "PP_2", "PS_2", "STD2", "IV2", "objpoke2", "selue_pk2", "pkmnsex2", "attack1", "attack2",
+            "actual1", "MAX_PP_1", "MAX_PS_1", "XTRA_PS_1", "atk1", "def1", "vel1", "atk_sp1", "def_sp1", "prec1", "tipoA1", "tipoB1", "tipoC1",
+            "actual2", "MAX_PP_2", "MAX_PS_2", "XTRA_PS_2", "atk2", "def2", "vel2", "atk_sp2", "def_sp2", "prec2", "tipoA2", "tipoB2", "tipoC2",
+        ];
+        thread_local! {
+            static IDS: std::cell::RefCell<[Option<usize>; 42]> = std::cell::RefCell::new([None; 42]);
+        }
+        let mut ids = IDS.with(|c| *c.borrow());
+        let mut changed = false;
+        for (k, slot) in ids.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = self.compiler.find_field_id(NAMES[k].as_bytes());
+                changed |= slot.is_some();
+            }
+        }
+        if changed {
+            IDS.with(|c| *c.borrow_mut() = ids);
+        }
+        // Camino rápido: si todo son números, el mismo cálculo en f64 (mismas operaciones y orden)
+        if let Some(Value::Real(a0)) = args.first() {
+            let fields: Vec<Option<&crate::instance::Field>> = ids.iter().map(|id| id.and_then(|id| self.globals.fields.get(&id))).collect();
+            let fast = (|| -> Option<f64> {
+                let v = |k: usize, idx: u32| -> Option<f64> {
+                    match fields[k]?.get(idx)? {
+                        Value::Real(x) => Some(x.into()),
+                        _ => None,
+                    }
+                };
+                let rt2 = |x: f64| -> f64 { f64::from(crate::math::Real::from(x * 100.0).round()) / 100.0 };
+                let mut acc: f64 = (*a0).into();
+                for i in 0..=5u32 {
+                    let fi = i as f64;
+                    acc = acc + ((((fi * 7.0) + v(0, i)? * 6.0) + v(1, i)? * 7.0) + v(2, i)? + 361.0);
+                    acc = acc + (((((fi * 3.0) + v(3, i)? * 7.0) + v(4, i)? * 6.0) + v(5, i)? * 11.0) + v(6, i)? + 361.0);
+                    acc = acc + ((((fi * 7.0) + v(7, i)? * 6.0) + v(8, i)? * 7.0) + v(9, i)? + 361.0);
+                    acc = acc + (((((fi * 3.0) + v(10, i)? * 7.0) + v(11, i)? * 6.0) + v(12, i)? * 11.0) + v(13, i)? + 361.0);
+                    for j in 1..=4u32 {
+                        let fj = j as f64;
+                        acc = acc + (v(14, i * 32000 + j)? * 7.0) * fj;
+                        acc = acc + (v(15, i * 32000 + j)? * 7.0) * fj;
+                    }
+                    for (b, velmul) in [(16usize, 7.0f64), (29usize, 9.0f64)] {
+                        let inner = ((((((v(b, 0)? + 8.0) * 5.0 + v(b + 1, i)? * 2.0) + v(b + 2, i)? * 2.0) + v(b + 3, i)? * 2.0)
+                            + v(b + 4, i)? * 3.0)
+                            + v(b + 5, i)? * 3.0)
+                            + rt2(v(b + 6, i)?) * velmul;
+                        acc = acc + ((fi * 13.0) + inner);
+                        let t = ((((v(b + 7, i)? * 5.0 + v(b + 8, i)? * 3.0) + v(b + 9, i)? * 4.0) + v(b + 10, i)? * 6.0)
+                            + v(b + 11, i)? * 5.0)
+                            + v(b + 12, i)? * 4.0;
+                        acc = acc + t;
+                    }
+                }
+                Some(acc)
+            })();
+            if let Some(x) = fast {
+                return Ok(Value::Real(x.into()))
+            }
+        }
         let mut acc = args.first().cloned().unwrap_or_default();
         let r = |x: f64| Value::Real(x.into());
         // valor de una variable global (índice: i, o i*32000+j)
         macro_rules! g {
-            ($name:expr, $idx:expr) => {{
+            ($k:expr, $idx:expr) => {{
                 let idx: u32 = $idx;
-                let id = self.compiler.find_field_id($name.as_bytes());
-                match id.and_then(|id| self.globals.fields.get(&id)).and_then(|f| f.get(idx)) {
+                let k: usize = $k;
+                match ids[k].and_then(|id| self.globals.fields.get(&id)).and_then(|f| f.get(idx)) {
                     Some(v) => v,
                     None if self.uninit_fields_are_zero => Value::default(),
-                    None => return Err(gml::Error::UninitializedVariable($name.into(), idx)),
+                    None => return Err(gml::Error::UninitializedVariable(NAMES[k].into(), idx)),
                 }
             }};
         }
@@ -1146,41 +1277,40 @@ impl crate::game::Game {
         for i in 0..=5u32 {
             let fi = r(i as f64);
             // v +=(i*7)+(PP_1[i]*6)+(PS_1[i]*7)+STD1[i]+361
-            let t = fi.clone().mul(r(7.0))?.add(g!("PP_1", i).mul(r(6.0))?)?.add(g!("PS_1", i).mul(r(7.0))?)?.add(g!("STD1", i))?.add(r(361.0))?;
+            let t = fi.clone().mul(r(7.0))?.add(g!(0, i).mul(r(6.0))?)?.add(g!(1, i).mul(r(7.0))?)?.add(g!(2, i))?.add(r(361.0))?;
             acc = acc.add(t)?;
             // v +=(i*3)+(IV[i]*7)+(objpoke1[i]*6)+(selue_pk1[i]*11)+pkmnsex1[i]+361
-            let t = fi.clone().mul(r(3.0))?.add(g!("IV", i).mul(r(7.0))?)?.add(g!("objpoke1", i).mul(r(6.0))?)?
-                .add(g!("selue_pk1", i).mul(r(11.0))?)?.add(g!("pkmnsex1", i))?.add(r(361.0))?;
+            let t = fi.clone().mul(r(3.0))?.add(g!(3, i).mul(r(7.0))?)?.add(g!(4, i).mul(r(6.0))?)?
+                .add(g!(5, i).mul(r(11.0))?)?.add(g!(6, i))?.add(r(361.0))?;
             acc = acc.add(t)?;
-            let t = fi.clone().mul(r(7.0))?.add(g!("PP_2", i).mul(r(6.0))?)?.add(g!("PS_2", i).mul(r(7.0))?)?.add(g!("STD2", i))?.add(r(361.0))?;
+            let t = fi.clone().mul(r(7.0))?.add(g!(7, i).mul(r(6.0))?)?.add(g!(8, i).mul(r(7.0))?)?.add(g!(9, i))?.add(r(361.0))?;
             acc = acc.add(t)?;
-            let t = fi.clone().mul(r(3.0))?.add(g!("IV2", i).mul(r(7.0))?)?.add(g!("objpoke2", i).mul(r(6.0))?)?
-                .add(g!("selue_pk2", i).mul(r(11.0))?)?.add(g!("pkmnsex2", i))?.add(r(361.0))?;
+            let t = fi.clone().mul(r(3.0))?.add(g!(10, i).mul(r(7.0))?)?.add(g!(11, i).mul(r(6.0))?)?
+                .add(g!(12, i).mul(r(11.0))?)?.add(g!(13, i))?.add(r(361.0))?;
             acc = acc.add(t)?;
             // for(j=1;j<=4;j+=1){ v +=attack1[i,j]*7*j; v +=attack2[i,j]*7*j; }
             for j in 1..=4u32 {
                 let fj = r(j as f64);
-                acc = acc.add(g!("attack1", i * 32000 + j).mul(r(7.0))?.mul(fj.clone())?)?;
-                acc = acc.add(g!("attack2", i * 32000 + j).mul(r(7.0))?.mul(fj)?)?;
+                acc = acc.add(g!(14, i * 32000 + j).mul(r(7.0))?.mul(fj.clone())?)?;
+                acc = acc.add(g!(15, i * 32000 + j).mul(r(7.0))?.mul(fj)?)?;
             }
-            for (side, velmul) in [("1", 7.0), ("2", 9.0)] {
-                let n = |base: &str| format!("{}{}", base, side);
+            for (b, velmul) in [(16usize, 7.0), (29usize, 9.0)] {
                 // v +=(i*13)+(((actual+8)*5)+(MAX_PP[i]*2)+(MAX_PS[i]*2)+(XTRA_PS[i]*2)+(atk[i]*3)+(def[i]*3)+(RoundToTwo(vel[i])*k))
-                let inner = g!(n("actual"), 0).add(r(8.0))?.mul(r(5.0))?
-                    .add(g!(format!("MAX_PP_{}", side), i).mul(r(2.0))?)?
-                    .add(g!(format!("MAX_PS_{}", side), i).mul(r(2.0))?)?
-                    .add(g!(format!("XTRA_PS_{}", side), i).mul(r(2.0))?)?
-                    .add(g!(n("atk"), i).mul(r(3.0))?)?
-                    .add(g!(n("def"), i).mul(r(3.0))?)?
-                    .add(rt2!(g!(n("vel"), i)).mul(r(velmul))?)?;
+                let inner = g!(b, 0).add(r(8.0))?.mul(r(5.0))?
+                    .add(g!(b + 1, i).mul(r(2.0))?)?
+                    .add(g!(b + 2, i).mul(r(2.0))?)?
+                    .add(g!(b + 3, i).mul(r(2.0))?)?
+                    .add(g!(b + 4, i).mul(r(3.0))?)?
+                    .add(g!(b + 5, i).mul(r(3.0))?)?
+                    .add(rt2!(g!(b + 6, i)).mul(r(velmul))?)?;
                 acc = acc.add(fi.clone().mul(r(13.0))?.add(inner)?)?;
                 // v +=(atk_sp[i]*5)+(def_sp[i]*3)+(prec[i]*4)+(tipoA[i]*6)+(tipoB[i]*5)+(tipoC[i]*4)
-                let t = g!(n("atk_sp"), i).mul(r(5.0))?
-                    .add(g!(n("def_sp"), i).mul(r(3.0))?)?
-                    .add(g!(n("prec"), i).mul(r(4.0))?)?
-                    .add(g!(n("tipoA"), i).mul(r(6.0))?)?
-                    .add(g!(n("tipoB"), i).mul(r(5.0))?)?
-                    .add(g!(n("tipoC"), i).mul(r(4.0))?)?;
+                let t = g!(b + 7, i).mul(r(5.0))?
+                    .add(g!(b + 8, i).mul(r(3.0))?)?
+                    .add(g!(b + 9, i).mul(r(4.0))?)?
+                    .add(g!(b + 10, i).mul(r(6.0))?)?
+                    .add(g!(b + 11, i).mul(r(5.0))?)?
+                    .add(g!(b + 12, i).mul(r(4.0))?)?;
                 acc = acc.add(t)?;
             }
         }

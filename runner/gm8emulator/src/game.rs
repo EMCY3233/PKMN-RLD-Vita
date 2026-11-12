@@ -2475,12 +2475,16 @@ impl Game {
         let (mut perf_t0, mut perf_frames, mut perf_busy) = (Instant::now(), 0u32, 0u64);
         #[cfg(target_os = "vita")]
         let mut vsync_on = true;
+        let mut hitch_logged = 0u32;
         loop {
             self.process_window_events();
 
             let t_frame = Instant::now();
+            let ph0 = PERF_PHASE_NS.with(|p| *p.borrow());
+            let draw0 = PERF_DRAW_NS.with(|c| c.get());
             // prueba en PC del menú de controles de la Vita (RLD_CONTROLS_TEST=fotograma)
-            if let Some(f) = std::env::var("RLD_CONTROLS_TEST").ok().and_then(|v| v.parse::<u32>().ok()) {
+            static CONTROLS_TEST: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+            if let Some(f) = *CONTROLS_TEST.get_or_init(|| std::env::var("RLD_CONTROLS_TEST").ok().and_then(|v| v.parse::<u32>().ok())) {
                 static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                 if !DONE.load(std::sync::atomic::Ordering::Relaxed) && perf_t0.elapsed().as_millis() as u32 >= f {
                     DONE.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2491,6 +2495,43 @@ impl Game {
                 }
             }
             self.frame()?;
+            // tirones: un fotograma de más de 60 ms (Vita) se apunta con su desglose
+            {
+                let (load_ms, items) = crate::hitch::take();
+                let redraws = crate::hitch::take_redraws();
+                let frame_ms = t_frame.elapsed().as_secs_f64() * 1e3;
+                static HITCH_MS: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+                let limit = *HITCH_MS.get_or_init(|| {
+                    std::env::var("RLD_HITCH_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(if cfg!(target_os = "vita") { 60.0 } else { f64::INFINITY })
+                });
+                if frame_ms >= limit && hitch_logged < 300 {
+                    hitch_logged += 1;
+                    let ph1 = PERF_PHASE_NS.with(|p| *p.borrow());
+                    let mut parts: Vec<(f64, &str)> = (0..14)
+                        .filter(|&i| i != 11)
+                        .map(|i| (ph1[i].saturating_sub(ph0[i]) as f64 / 1e6, PERF_PHASE_NAMES[i]))
+                        .filter(|(ms, _)| *ms >= 2.0)
+                        .collect();
+                    parts.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    let draw_ms = PERF_DRAW_NS.with(|c| c.get()).saturating_sub(draw0) as f64 / 1e6;
+                    let room = self.assets.rooms.get_asset(self.room.id).map(|r| r.name.decode_utf8().into_owned()).unwrap_or_default();
+                    let mut line = format!("tirón: {:.0} ms en '{}' | dibujo {:.0}", frame_ms, room, draw_ms);
+                    for (ms, n) in parts {
+                        line.push_str(&format!(", {} {:.0}", n, ms));
+                    }
+                    if redraws > 0 {
+                        line.push_str(&format!(" | {} redibujados del juego (diálogo/transición)", redraws));
+                    }
+                    if load_ms >= 1.0 {
+                        line.push_str(&format!(" | cargas {:.0} ms", load_ms));
+                    }
+                    if !items.is_empty() {
+                        let list: Vec<String> = items.iter().take(8).map(|(n, ms)| format!("{} {:.0}", n, ms)).collect();
+                        line.push_str(&format!(" | {}", list.join(", ")));
+                    }
+                    crate::startlog(&line);
+                }
+            }
             if perf_on {
                 perf_busy += t_frame.elapsed().as_nanos() as u64;
                 perf_frames += 1;
@@ -2519,6 +2560,11 @@ impl Game {
                         let parts: Vec<String> =
                             idx.iter().take(6).map(|&i| format!("{} {:.1}", PERF_PHASE_NAMES[i], ph[i] as f64 / f / 1e6)).collect();
                         crate::startlog(&format!("  lógica (ms/fotograma): {}", parts.join(", ")));
+                        let (dns, dn, dd) = crate::game::draw::DRAW_STATS.with(|c| c.replace((0, 0, 0)));
+                        crate::startlog(&format!(
+                            "  dibujo (por fotograma): eventos de dibujo del juego {:.1} ms ({:.0} instancias), {:.0} instancias por defecto",
+                            dns as f64 / f / 1e6, dn as f64 / f, dd as f64 / f
+                        ));
                     }
                     if std::env::var_os("RLD_DEBUG_HOLDERS").is_some() {
                         self.dump_holder_stats(perf_frames.max(1) as u64);
@@ -3403,6 +3449,11 @@ impl Game {
         let el = t0.elapsed();
         COMPILE_NS.with(|c| c.set(c.get() + el.as_nanos() as u64));
         self.hot_note_compile(id, el.as_secs_f64() * 1e3);
+        if el.as_millis() >= 2 {
+            if let Some(Some(s)) = self.assets.scripts.get(id) {
+                crate::hitch::note(&format!("compilar {}", self.decode_str(s.name.as_ref())), el.as_secs_f64() * 1e3);
+            }
+        }
         if el.as_millis() >= 2 && std::env::var_os("RLD_DEBUG_COMPILE").is_some() {
             let name = self.assets.scripts.get(id).and_then(|s| s.as_ref()).map(|s| self.decode_str(s.name.as_ref()).into_owned()).unwrap_or_default();
             eprintln!("compilar: {} ({} bytes) {:.1} ms (reescribir {:.1} ms) (sala {})", name, src.as_ref().len(), el.as_secs_f64() * 1e3, t_rw.as_secs_f64() * 1e3, self.room.id);

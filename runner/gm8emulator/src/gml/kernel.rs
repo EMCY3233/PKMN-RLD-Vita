@@ -495,6 +495,7 @@ impl Game {
 
     pub fn screen_redraw(&mut self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
+        crate::hitch::count_redraw();
         self.draw()?;
         let (width, height) = self.window_inner_size;
         if self.play_type != PlayType::Record {
@@ -5977,6 +5978,7 @@ impl Game {
     }
 
     pub fn file_text_open_read(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let _lt = crate::hitch::LoadTimer::new("file_text_open_read");
         let filename = expect_args!(args, [string])?;
         use std::error::Error as _; // for .source() trait method
 
@@ -8619,6 +8621,7 @@ impl Game {
     }
 
     pub fn sprite_add(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let _lt = crate::hitch::LoadTimer::new("sprite_add");
         let (fname, imgnumb, removeback, smooth, origin_x, origin_y) =
             expect_args!(args, [string, int, bool, bool, int, int])?;
         let imgnumb = imgnumb.max(1) as usize;
@@ -8669,6 +8672,7 @@ impl Game {
     }
 
     pub fn sprite_replace(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let _lt = crate::hitch::LoadTimer::new("sprite_replace");
         let (sprite_id, fname, imgnumb, removeback, smooth, origin_x, origin_y) =
             expect_args!(args, [int, string, int, bool, bool, int, int])?;
         if let Some(sprite) = self.assets.sprites.get_asset_mut(sprite_id) {
@@ -8729,6 +8733,7 @@ impl Game {
     ///   por fotograma: u32 800, u32 ancho, u32 alto, u32 longitud, píxeles BGRA,
     ///   u32 forma, u32 tolerancia, u32 máscaras separadas, u32 tipo de caja, u32 izq, der, abajo, arriba }
     pub fn sprite_add_sprite(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let _lt = crate::hitch::LoadTimer::new("sprite_add_sprite");
         let fname = expect_args!(args, [string])?;
         let path = file::to_path(&fname).into_owned();
         let t0 = std::time::Instant::now();
@@ -9176,6 +9181,7 @@ impl Game {
     }
 
     pub fn background_add(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let _lt = crate::hitch::LoadTimer::new("background_add");
         let (fname, removeback, smooth) = expect_args!(args, [string, bool, bool])?;
         let t0 = std::time::Instant::now();
         let mut image = match file::load_image(file::to_path(&fname).as_ref()) {
@@ -9209,6 +9215,7 @@ impl Game {
     }
 
     pub fn background_replace(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let _lt = crate::hitch::LoadTimer::new("background_replace");
         let (background_id, fname, removeback, smooth) = expect_args!(args, [int, string, bool, bool])?;
         if let Some(background) = self.assets.backgrounds.get_asset_mut(background_id) {
             if let Some(atlas_ref) = background.atlas_ref {
@@ -9377,6 +9384,7 @@ impl Game {
     }
 
     pub fn sound_add(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let _lt = crate::hitch::LoadTimer::new("sound_add");
         let (fname, kind, preload) = expect_args!(args, [string, int, bool])?;
         let path_buf = std::path::PathBuf::from(file::to_path(fname.as_ref()).as_ref());
         let data = match file::read_any(&path_buf.to_string_lossy()) {
@@ -9410,6 +9418,7 @@ impl Game {
     }
 
     pub fn sound_replace(&mut self, args: &[Value]) -> gml::Result<Value> {
+        let _lt = crate::hitch::LoadTimer::new("sound_replace");
         let (sound_id, fname, kind, preload) = expect_args!(args, [int, string, int, bool])?;
         let t0 = std::time::Instant::now();
         let dbg = std::env::var_os("RLD_DEBUG_SOUND").is_some();
