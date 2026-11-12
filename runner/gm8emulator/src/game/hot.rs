@@ -86,9 +86,14 @@ impl Game {
             return
         }
         let room = self.room.id;
-        self.hot.by_room.entry(room).or_default().push(id);
         if let Some(Some(s)) = self.assets.scripts.get(id) {
             let name = self.decode_str(s.name.as_ref()).into_owned();
+            // Las de combate se compilan al empezar el combate (pausa de transición), aunque se
+            // llamen en la sala del mapa donde te ve el entrenador: no cargar con ellas esa sala.
+            if ["Ataque", "PrepareBattle", "SecEffect", "Effect", "Stat", "TrainerPokemon"].iter().any(|p| name.starts_with(p)) {
+                return
+            }
+            self.hot.by_room.entry(room).or_default().push(id);
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(FILE) {
                 let _ = writeln!(f, "{}\t{}", room, name);
             }

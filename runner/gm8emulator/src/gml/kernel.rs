@@ -9177,6 +9177,7 @@ impl Game {
 
     pub fn background_add(&mut self, args: &[Value]) -> gml::Result<Value> {
         let (fname, removeback, smooth) = expect_args!(args, [string, bool, bool])?;
+        let t0 = std::time::Instant::now();
         let mut image = match file::load_image(file::to_path(&fname).as_ref()) {
             Ok(im) => im,
             Err(e) => {
@@ -9184,13 +9185,19 @@ impl Game {
                 return Ok((-1).into())
             },
         };
+        let t1 = t0.elapsed();
         asset::sprite::process_image(&mut image, removeback, smooth, true);
         let width = image.width();
         let height = image.height();
+        let t2 = t0.elapsed();
         let atlas_ref = self
             .renderer
             .upload_sprite(image.into_raw().into_boxed_slice(), width as _, height as _, 0, 0)
             .map_err(|e| gml::Error::FunctionError("background_add".into(), e.into()))?;
+        if std::env::var_os("RLD_DEBUG_SPR").is_some() {
+            eprintln!("background_add {} {}x{}: leer {:.1} ms, procesar {:.1} ms, subir {:.1} ms", fname, width, height,
+                t1.as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, (t0.elapsed() - t2).as_secs_f64() * 1e3);
+        }
         let background_id = self.assets.backgrounds.len();
         self.assets.backgrounds.push(Some(Box::new(asset::Background {
             name: format!("__newbackground{}", background_id).into(),
@@ -10229,6 +10236,8 @@ impl Game {
 
     pub fn object_event_add(&mut self, args: &[Value]) -> gml::Result<Value> {
         let (object_index, ev_type, ev_number, code) = expect_args!(args, [int, int, int, bytes])?;
+        let t0 = std::time::Instant::now();
+        let dbg = std::env::var_os("RLD_DEBUG_SPR").is_some();
         if let Some(object) = self.assets.objects.get_asset_mut(object_index) {
             let instrs = match self.compiler.compile(code.as_ref()) {
                 Ok(instrs) => instrs,
@@ -10241,7 +10250,29 @@ impl Game {
                 },
                 None => {
                     object_event_map.insert(ev_number as u32, action::Tree::new_from_code(instrs));
-                    self.refresh_event_holders();
+                    let t1 = t0.elapsed();
+                    if ev_type as usize == gml::ev::COLLISION || std::env::var_os("RLD_FULL_EVENT_REFRESH").is_some() {
+                        self.refresh_event_holders();
+                    } else {
+                        // Solo hace falta añadir este objeto y sus hijos a la lista de este evento
+                        // (rehacer todas las listas costaba ~8 ms en PC por llamada, ~150 ms en la Vita)
+                        let children: Vec<crate::types::ID> = match self.assets.objects.get_asset(object_index) {
+                            Some(o) => o.children.borrow().iter().copied().collect(),
+                            None => Vec::new(),
+                        };
+                        let list = self.event_holders[ev_type as usize].entry(ev_number as u32).or_insert(Default::default()).clone();
+                        let mut l = list.borrow_mut();
+                        l.extend(children.iter().copied());
+                        l.sort_unstable();
+                        l.dedup();
+                        if ev_type as usize == gml::ev::DRAW {
+                            self.custom_draw_objects.extend(children);
+                        }
+                    }
+                    if dbg {
+                        eprintln!("object_event_add {} {}/{}: compilar {:.1} ms, refrescar {:.1} ms", object_index, ev_type, ev_number,
+                            t1.as_secs_f64() * 1e3, (t0.elapsed() - t1).as_secs_f64() * 1e3);
+                    }
                 },
             }
         }
