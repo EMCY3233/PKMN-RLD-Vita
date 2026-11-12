@@ -66,3 +66,22 @@ panel trasero = teclas 1-4.
   (10,7 ms) y prioridad alta para que los efectos vayan a tiempo.
 - **Archivos**: lo que está en reloaded.pak y no suelto en disco se lee directamente del paquete, sin intentar
   abrir antes el archivo en la tarjeta (las partidas y lo que escribe el juego siguen teniendo prioridad).
+
+## Tirones (12-13/11)
+- **Tirones de ~500 ms en todas las salas**: el vitaGL de VitaSDK, al hacer `glTexSubImage2D` sobre una textura
+  usada en los últimos 4 fotogramas (FRAME_PURGE_FREQ), copia la textura entera a memoria nueva. Cada sprite
+  cargado en una página de 32 MB copiaba 32 MB (la memoria libre de vitaGL bajaba justo 32 MB). Solución: la CI
+  compila vitaGL (commit 2bdbe89, `NO_DEBUG=1`, igual que VitaSDK) con `TEXTURES_SPEEDHACK=1`; el runner solo
+  escribe en huecos libres y hace `glFinish` antes de vaciar o reutilizar una página.
+- Páginas de texturas diferidas de 2048×4096 (32 MB) si caben dos en el presupuesto; compactación al cambiar de sala
+  si hay más de una página con sprites o está llena al 60 %. Ojo: en runner.log los lotes y cambios de textura son
+  totales de 5 s, no por fotograma.
+- **Compilación**: las tablas de datos (Ataque_DT 1 MB, Ataque_MT, Ataque_Tutor, Ataque_Nivel, VoladorPokemon,
+  DrawViejo…) se convierten en tablas nativas antes de compilar (`if(V=N)return(..)` con cualquier variable,
+  `V=a||V=b…`, `V!=a&&V!=b…`, rangos y `switch` de muchos casos). Las scripts que tardan se apuntan por sala en
+  `rld_scripts_pesadas.txt` y se compilan al entrar en la sala (lista inicial para el combate).
+- **Antitrampas** `rld_secpk2_sum`: ids guardados y cálculo en f64 (25 → 1,9 µs; ~12 llamadas por fotograma en combate).
+- `object_event_add` sin reconstruir todas las listas de eventos; MP3 medidos por cabeceras; tablas de remuestreo
+  calculadas en segundo plano; búsqueda de instancias por id con mapa.
+- **runner.log**: línea `tirón:` para cada fotograma > 60 ms con fases, dibujo, cargas, compilaciones, eventos de
+  dibujo lentos y funciones del motor lentas dentro de ellos.
