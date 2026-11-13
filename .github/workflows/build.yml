@@ -1,19 +1,12 @@
 name: Build
 
-# Para ahorrar minutos de Actions (repositorio privado: 2.000 min/mes en el plan gratuito):
-# - solo al enviar cambios del runner o de la Vita a port-inicial (no por pull_request: duplicaba cada
-#   compilación), o a mano desde la pestaña Actions;
-# - por defecto solo se compila el VPK con gráficos; el resto de trabajos solo a mano (todos=true).
+# Repositorio público: los minutos de Actions son gratuitos. Aun así solo se compila al enviar cambios del
+# runner o de la Vita a port-inicial (no por pull_request: duplicaba cada compilación), o a mano.
 on:
   push:
     branches: [port-inicial]
     paths: ['runner/**', 'vita/**', '.github/workflows/**']
   workflow_dispatch:
-    inputs:
-      todos:
-        description: 'Compilar también Linux, benchmark y VPK de prueba'
-        type: boolean
-        default: false
 
 # Un envío a una rama con pull request abierto lanzaba dos compilaciones idénticas (push y pull_request):
 # la más reciente cancela a la otra, así cada cambio gasta la mitad de minutos de Actions.
@@ -24,7 +17,6 @@ concurrency:
 jobs:
   linux-runner:
     name: Runner (Linux)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.todos }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +39,6 @@ jobs:
 
   vita-loader-test:
     name: VPK de prueba (PS Vita)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.todos }}
     runs-on: ubuntu-24.04
     container: vitasdk/vitasdk:latest
     steps:
@@ -86,7 +77,6 @@ jobs:
 
   vita-runner-bench:
     name: Runner Vita (benchmark)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.todos }}
     runs-on: ubuntu-24.04
     container: vitasdk/vitasdk:latest
     steps:
