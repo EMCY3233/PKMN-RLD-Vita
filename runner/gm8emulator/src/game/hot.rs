@@ -121,3 +121,43 @@ impl Game {
     }
 }
 
+
+impl Game {
+    /// Si el montón está casi lleno (Vita: más de 185 de 230 MB), al cambiar de sala se libera el
+    /// código compilado de las scripts que no se han usado en las dos últimas salas (se volverán a
+    /// compilar si hacen falta). Las que la sala nueva necesita (lista de pesadas) se conservan.
+    pub fn free_cold_scripts(&mut self, next_room: i32) {
+        let force = std::env::var_os("RLD_EVICT_ALWAYS").is_some();
+        let used = crate::render::opengl::heap_used_mb();
+        let limit: usize = std::env::var("RLD_EVICT_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(185);
+        if !force && used.map_or(true, |u| u < limit) {
+            return
+        }
+        self.hot_load();
+        let keep: std::collections::HashSet<usize> = self.hot.by_room.get(&next_room).cloned().unwrap_or_default().into_iter().collect();
+        let epoch = self.room_epoch;
+        let mut freed = 0usize;
+        let mut bytes = 0usize;
+        for (id, s) in self.assets.scripts.iter_mut().enumerate() {
+            let Some(s) = s else { continue };
+            if s.compiled.get().is_none() || keep.contains(&id) {
+                continue
+            }
+            if epoch.wrapping_sub(s.last_used.get()) > 2 {
+                bytes += s.source.as_ref().len();
+                s.compiled.take();
+                freed += 1;
+            }
+        }
+        if freed > 0 {
+            let after = crate::render::opengl::heap_used_mb();
+            crate::startlog(&format!(
+                "memoria: liberado el código de {} scripts sin usar ({} KB de código fuente); montón {} -> {} MB",
+                freed,
+                bytes / 1024,
+                used.map_or("?".into(), |u| u.to_string()),
+                after.map_or("?".into(), |u| u.to_string())
+            ));
+        }
+    }
+}

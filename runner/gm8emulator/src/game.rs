@@ -20,6 +20,7 @@ pub mod surface;
 pub mod transition;
 pub mod view;
 pub mod keymap;
+pub mod pad;
 pub mod hot;
 pub mod pages;
 #[cfg(all(target_os = "vita", feature = "vitagl"))]
@@ -202,6 +203,8 @@ pub struct Game {
     pub tour_first_error: String,
     /// scripts pesadas que se compilan al entrar en la sala (game/hot.rs)
     pub hot: hot::HotScripts,
+    /// contador de cambios de sala (Script::last_used)
+    pub room_epoch: u32,
     /// rectángulo de la vista que se está dibujando (izq, arriba, der, abajo, proyección) para omitir lo que queda fuera
     pub cull_rect: Option<(f64, f64, f64, f64, u64)>,
     pub uninit_args_are_zero: bool,
@@ -1122,7 +1125,7 @@ impl Game {
             .map(|t| {
                 t.map(|b| {
                     // Compilación diferida: solo se registra el nombre (necesario para resolver llamadas)
-                    Ok::<_, String>(Box::new(Script { name: b.name.into(), source: b.source.into(), compiled: Default::default() }))
+                    Ok::<_, String>(Box::new(Script { name: b.name.into(), source: b.source.into(), compiled: Default::default(), last_used: Default::default() }))
                 })
                 .transpose()
             })
@@ -1242,6 +1245,10 @@ impl Game {
         };
 
         crate::startlog("  launch: antes de salas");
+        // 415.686 instancias en las salas, casi todas sin código de creación: un único código vacío
+        // compartido en vez de una reserva por instancia
+        let empty_code: Result<std::rc::Rc<[crate::gml::runtime::Instruction]>, String> =
+            compiler.compile(b"").map_err(|e| e.message.to_string());
         let rooms = rooms
             .into_iter()
             .map(|t| {
@@ -1328,34 +1335,41 @@ impl Game {
                                 y: i.y,
                                 object: i.object,
                                 id: i.id,
-                                creation: compiler.compile(&i.creation_code.0).map_err(|e| {
-                                    format!("Compiler error in creation code of instance {}: {}", i.id, e)
-                                }),
-                                xscale: i.xscale,
-                                yscale: i.yscale,
+                                creation: if i.creation_code.0.is_empty() {
+                                    empty_code.clone()
+                                } else {
+                                    compiler.compile(&i.creation_code.0).map_err(|e| {
+                                        format!("Compiler error in creation code of instance {}: {}", i.id, e)
+                                    })
+                                },
+                                xscale: i.xscale as f32,
+                                yscale: i.yscale as f32,
                                 blend: i.blend,
-                                angle: i.angle,
+                                angle: i.angle as f32,
                             })
                             .collect::<Vec<_>>()
                             .into(),
                         tiles: b
                             .tiles
                             .into_iter()
-                            .map(|t| tile::Tile {
-                                x: Cell::new(t.x.into()),
-                                y: Cell::new(t.y.into()),
-                                background_index: Cell::new(t.source_bg),
-                                tile_x: Cell::new(t.tile_x as _),
-                                tile_y: Cell::new(t.tile_y as _),
-                                width: Cell::new(t.width as _),
-                                height: Cell::new(t.height as _),
-                                depth: Cell::new(t.depth.into()),
-                                id: Cell::new(t.id),
-                                alpha: Cell::new(Real::from(t.blend >> 24) / Real::from(255)),
-                                blend: Cell::new((t.blend & 0xFFFFFF) as i32),
-                                xscale: Cell::new(t.xscale.into()),
-                                yscale: Cell::new(t.yscale.into()),
-                                visible: Cell::new(true),
+                            .map(|t| {
+                                if (t.xscale as f32) as f64 != t.xscale || (t.yscale as f32) as f64 != t.yscale {
+                                    crate::startlog(&format!("aviso: escala de tile {} no exacta en f32", t.id));
+                                }
+                                asset::room::RoomTile {
+                                    x: t.x,
+                                    y: t.y,
+                                    source_bg: t.source_bg,
+                                    tile_x: t.tile_x as _,
+                                    tile_y: t.tile_y as _,
+                                    width: t.width as _,
+                                    height: t.height as _,
+                                    depth: t.depth,
+                                    id: t.id,
+                                    blend: t.blend,
+                                    xscale: t.xscale as f32,
+                                    yscale: t.yscale as f32,
+                                }
                             })
                             .collect::<Vec<_>>()
                             .into(),
@@ -1372,6 +1386,16 @@ impl Game {
         let custom_draw_objects =
             event_holders[ev::DRAW].iter().flat_map(|(_, x)| x.borrow().iter().copied().collect::<Vec<_>>()).collect();
 
+        if std::env::var_os("RLD_ROOM_STATS").is_some() {
+            let (mut ni, mut nt, mut nb) = (0usize, 0usize, 0usize);
+            for r in rooms.iter().flatten() {
+                ni += r.instances.len();
+                nt += r.tiles.len();
+                nb += r.backgrounds.len();
+            }
+            crate::startlog(&format!("salas: {} instancias, {} tiles, {} fondos; tamaño Tile {} B, Instance {} B", ni, nt, nb,
+                std::mem::size_of::<asset::room::RoomTile>(), std::mem::size_of::<room::Instance>()));
+        }
         crate::startlog("  launch: antes de push_atlases");
         renderer.push_atlases(atlases)?;
         if lazy {
@@ -1452,6 +1476,7 @@ impl Game {
             errors_logged: 0,
             tour_first_error: String::new(),
             hot: Default::default(),
+            room_epoch: 0,
             cull_rect: None,
             uninit_args_are_zero: !settings.error_on_uninitialized_args,
             swap_creation_events: settings.swap_creation_events,
@@ -1696,6 +1721,8 @@ impl Game {
 
     pub fn load_room(&mut self, room_id: i32) -> Result<(), Box<dyn std::error::Error>> {
         self.renderer.compact_textures();
+        self.room_epoch = self.room_epoch.wrapping_add(1);
+        self.free_cold_scripts(room_id);
         self.hot_prewarm(room_id);
         let (room, room_state, is_stored) = if let Some(room) = self.assets.rooms.get_asset(room_id) {
             if let Some(p) = self.stored_rooms.iter().position(|x| x.id == room_id) {
@@ -1808,7 +1835,7 @@ impl Game {
 
         // Load all tiles in new room
         for tile in room.tiles.iter() {
-            self.room.tile_list.insert(tile.clone());
+            self.room.tile_list.insert(tile.to_tile());
         }
 
         // Load all instances in new room, unless they already exist due to persistence
@@ -1831,11 +1858,11 @@ impl Game {
                             Real::from(instance.y),
                             instance.object,
                             Some(object),
-                            Real::from(instance.xscale),
-                            Real::from(instance.yscale),
+                            Real::from(f64::from(instance.xscale)),
+                            Real::from(f64::from(instance.yscale)),
                             (instance.blend & 0xFFFFFF) as i32,
                             Real::from(instance.blend >> 24) / Real::from(255),
-                            Real::from(instance.angle),
+                            Real::from(f64::from(instance.angle)),
                         )),
                         instance,
                     ));
@@ -3432,6 +3459,7 @@ impl Game {
     pub fn script_code(&mut self, id: usize) -> gml::Result<std::rc::Rc<[crate::gml::runtime::Instruction]>> {
         let src = match self.assets.scripts.get(id) {
             Some(Some(s)) => {
+                s.last_used.set(self.room_epoch);
                 if let Some(c) = s.compiled.get() {
                     return Ok(c.clone())
                 }

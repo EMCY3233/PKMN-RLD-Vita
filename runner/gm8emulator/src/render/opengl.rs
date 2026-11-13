@@ -296,6 +296,16 @@ fn platform_mem_report() -> String {
 fn platform_mem_report() -> String {
     String::new()
 }
+/// MB usados del montón (solo en la Vita)
+#[cfg(target_os = "vita")]
+pub fn heap_used_mb() -> Option<usize> {
+    Some(vgl::heap_used_mb())
+}
+#[cfg(not(target_os = "vita"))]
+pub fn heap_used_mb() -> Option<usize> {
+    None
+}
+
 /// Memoria libre (vitaGL y montón) como texto, para el registro
 pub fn mem_report_text() -> String {
     platform_mem_report()

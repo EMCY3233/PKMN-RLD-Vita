@@ -3,16 +3,27 @@
 //! El mapa se lee de `ux0:data/reloaded/keymap.ini` (mismo formato que vita/keymap.ini del
 //! repositorio); si no existe se usa el mapa por defecto de abajo, idéntico a ese archivo.
 //! - Capa base: cada botón es una tecla.
-//! - Mantener L o R: los botones cambian a la capa L/R. L pulsado solo (sin usar la capa) = SHIFT
-//!   breve; R mantenido solo = CTRL mientras se mantenga (acelerar combates).
+//! - Mantener L o R: los botones cambian a la capa L/R. L solo (sin usar la capa) = SHIFT (toque breve,
+//!   o mantenido mientras se mantenga L: ver ataques); R mantenido solo = CTRL (acelerar combates).
+//!   La lógica de botones está en game/pad.rs (sin dependencias de la Vita, con pruebas en PC).
 //! - Stick izquierdo = cruceta. SELECT+START = ESCAPE.
 //! - Pantalla táctil = ratón (clic izquierdo). Panel trasero: 4 cuadrantes = teclas 1-4.
 
 use super::keymap::*;
-use std::collections::HashMap;
 use vitasdk_sys::*;
 
 
+// las máscaras de game/pad.rs tienen que ser las de VitaSDK
+const _: () = {
+    use super::pad;
+    assert!(pad::SELECT == SCE_CTRL_SELECT && pad::START == SCE_CTRL_START && pad::UP == SCE_CTRL_UP);
+    assert!(pad::DOWN == SCE_CTRL_DOWN && pad::LEFT == SCE_CTRL_LEFT && pad::RIGHT == SCE_CTRL_RIGHT);
+    assert!(pad::LTRIG == SCE_CTRL_LTRIGGER && pad::RTRIG == SCE_CTRL_RTRIGGER);
+    assert!(pad::CROSS == SCE_CTRL_CROSS && pad::CIRCLE == SCE_CTRL_CIRCLE);
+    assert!(pad::SQUARE == SCE_CTRL_SQUARE && pad::TRIANGLE == SCE_CTRL_TRIANGLE);
+};
+
+#[allow(dead_code)]
 const ALL: [(Btn, u32); 12] = [
     (Btn::Up, SCE_CTRL_UP),
     (Btn::Down, SCE_CTRL_DOWN),
@@ -34,19 +45,9 @@ pub struct VitaInput {
     pub km_text: String,
     pub km_path: std::path::PathBuf,
     prev_buttons: u32,
-    /// teclas que mantenemos pulsadas y por qué botón
-    held: HashMap<Btn, u8>,
-    layer_used_l: bool,
-    layer_used_r: bool,
-    layer_used_select: bool,
-    skip_lr_tap: u32,
-    select_release_in: u32,
-    r_frames: u32,
-    r_ctrl: bool,
-    shift_release_in: u32,
+    /// botones → teclas (game/pad.rs, probado en PC)
+    pad: super::pad::PadLogic,
     stick: [bool; 4],
-    /// combinación activa (índice) y si ya se soltó alguno de sus botones
-    combo: Option<usize>,
     touching: bool,
     /// toque actual sobre la barra de teclas: tecla pulsada
     overlay_key: Option<u8>,
@@ -84,17 +85,8 @@ impl VitaInput {
             km_text: text.clone(),
             km_path: game_dir.join("keymap.ini"),
             prev_buttons: 0,
-            held: HashMap::new(),
-            layer_used_l: false,
-            layer_used_r: false,
-            layer_used_select: false,
-            skip_lr_tap: 0,
-            select_release_in: 0,
-            r_frames: 0,
-            r_ctrl: false,
-            shift_release_in: 0,
+            pad: super::pad::PadLogic::new(),
             stick: [false; 4],
-            combo: None,
             touching: false,
             overlay_key: None,
             rear_held: None,
@@ -107,12 +99,17 @@ impl VitaInput {
         }
     }
 
+    /// Mantiene al día los botones que ve la lógica del pad cuando el juego no los recibe
+    /// (página abierta, teclado del sistema): así al volver no hay pulsaciones fantasma
+    fn pad_sync(&mut self, buttons: u32) {
+        self.pad.sync(buttons);
+    }
+
     /// Cambia el mapa en uso (tras editarlo desde la guía)
     pub fn reload(&mut self, text: String) {
         self.km = parse(&text);
         self.km_text = text;
-        self.held.clear();
-        self.combo = None;
+        self.pad = super::pad::PadLogic::new();
     }
 
     /// Lee mandos y pantallas táctiles; `win` = tamaño de la ventana (960×544)
@@ -177,17 +174,16 @@ impl VitaInput {
                 page_scroll(-lines);
             }
             // soltar todo lo que estuviera pulsado para el juego
-            for (_, vk) in self.held.drain() {
-                out.push(Out::Key(vk, false));
-            }
+            let mut rel = Vec::new();
+            self.pad.release_all(&self.km, &mut rel);
+            out.extend(rel.into_iter().map(|(vk, d)| Out::Key(vk, d)));
+            self.pad_sync(buttons);
             self.prev_buttons = buttons;
-            self.layer_used_l = true;
-            self.layer_used_r = true;
-            self.layer_used_select = true;
             return out
         }
         // con el teclado del sistema abierto, los botones son suyos
         if self.ime.is_some() {
+            self.pad_sync(buttons);
             self.prev_buttons = buttons;
             return out
         }
@@ -196,167 +192,35 @@ impl VitaInput {
             use std::sync::atomic::Ordering::Relaxed;
             let v = !crate::render::OVERLAY_VISIBLE.load(Relaxed);
             crate::render::OVERLAY_VISIBLE.store(v, Relaxed);
-            self.layer_used_l = true;
-            self.layer_used_r = true;
-            self.layer_used_select = true;
+            let mut rel = Vec::new();
+            self.pad.release_all(&self.km, &mut rel);
+            out.extend(rel.into_iter().map(|(vk, d)| Out::Key(vk, d)));
+            self.pad_sync(buttons);
             self.prev_buttons = buttons;
             return out
         }
         // SELECT+TRIÁNGULO = teclado del sistema
         if down(SCE_CTRL_SELECT) && pressed & SCE_CTRL_TRIANGLE != 0 {
             self.ime_request = true;
+            let mut rel = Vec::new();
+            self.pad.release_all(&self.km, &mut rel);
+            out.extend(rel.into_iter().map(|(vk, d)| Out::Key(vk, d)));
+            self.pad_sync(buttons);
             self.prev_buttons = buttons;
             return out
         }
-        // combinaciones de [combos] (SELECT+START = ESC, L+R+TRIÁNGULO = CTRL+P…): se activan al
-        // pulsar el último botón con los demás mantenidos y se sueltan al soltar cualquiera
-        let mask_of = |b: Btn| ALL.iter().find(|(x, _)| *x == b).map_or(0, |(_, m)| *m);
-        if let Some(ci) = self.combo {
-            let (btns, keys) = &self.km.combos[ci];
-            if !btns.iter().all(|&b| down(mask_of(b))) {
-                for &vk in keys.iter().rev() {
-                    if vk != ACT_GUIDE && vk != ACT_BAR {
-                        out.push(Out::Key(vk, false));
-                    }
-                }
-                self.combo = None;
-            }
+        // botones → teclas (capas, toques/mantenidos de L/R/SELECT y combinaciones): game/pad.rs
+        let (keys, req) = self.pad.step(buttons, &self.km);
+        for (vk, d) in keys {
+            out.push(Out::Key(vk, d));
         }
-        if self.combo.is_none() {
-            // las combinaciones más largas primero (L+R+START antes que R+START)
-            let mut order: Vec<usize> = (0..self.km.combos.len()).collect();
-            order.sort_by_key(|&i| std::cmp::Reverse(self.km.combos[i].0.len()));
-            for ci in order {
-                let (btns, keys) = &self.km.combos[ci];
-                if btns.iter().all(|&b| down(mask_of(b))) && btns.iter().any(|&b| pressed & mask_of(b) != 0) {
-                    // soltar lo que esos botones tuvieran pulsado por separado
-                    for &b in btns {
-                        if let Some(vk) = self.held.remove(&b) {
-                            out.push(Out::Key(vk, false));
-                        }
-                    }
-                    for &vk in keys {
-                        match vk {
-                            ACT_GUIDE => self.guide_request = true,
-                            ACT_BAR => {
-                                use std::sync::atomic::Ordering::Relaxed;
-                                let v = !crate::render::OVERLAY_VISIBLE.load(Relaxed);
-                                crate::render::OVERLAY_VISIBLE.store(v, Relaxed);
-                            },
-                            _ => out.push(Out::Key(vk, true)),
-                        }
-                    }
-                    self.layer_used_l = true;
-                    self.layer_used_r = true;
-                    self.layer_used_select = true;
-                    self.combo = Some(ci);
-                    break
-                }
-            }
+        if req.guide {
+            self.guide_request = true;
         }
-        let esc = self.combo.is_some();
-
-        // L y R con SELECT mantenido: su tecla de la capa SELECT (L = F1 ayuda, R = Q misiones)
-        for (b, mask) in [(Btn::L, SCE_CTRL_LTRIGGER), (Btn::R, SCE_CTRL_RTRIGGER)] {
-            if released & mask != 0 {
-                if let Some(vk) = self.held.remove(&b) {
-                    out.push(Out::Key(vk, false));
-                }
-            }
-            if pressed & mask != 0 && !esc && down(SCE_CTRL_SELECT) {
-                if let Some(&vk) = self.km.layer_select.get(&b) {
-                    self.layer_used_select = true;
-                    self.held.insert(b, vk);
-                    out.push(Out::Key(vk, true));
-                    self.skip_lr_tap |= mask;
-                }
-            }
-        }
-
-        for (b, mask) in ALL {
-            if b == Btn::L || b == Btn::R || b == Btn::Select {
-                continue
-            }
-            if released & mask != 0 {
-                if let Some(vk) = self.held.remove(&b) {
-                    out.push(Out::Key(vk, false));
-                }
-            }
-            if pressed & mask != 0 && !esc {
-                let vk = if down(SCE_CTRL_SELECT) {
-                    self.layer_used_select = true;
-                    self.km.layer_select.get(&b).copied()
-                } else if down(SCE_CTRL_LTRIGGER) {
-                    self.layer_used_l = true;
-                    self.km.layer_l.get(&b).copied()
-                } else if down(SCE_CTRL_RTRIGGER) {
-                    self.layer_used_r = true;
-                    self.km.layer_r.get(&b).copied()
-                } else {
-                    self.km.base.get(&b).copied()
-                };
-                if let Some(vk) = vk {
-                    self.held.insert(b, vk);
-                    out.push(Out::Key(vk, true));
-                }
-            }
-        }
-
-        // SELECT: toque corto sin usar su capa = su tecla (ESPACIO) durante 2 fotogramas
-        if pressed & SCE_CTRL_SELECT != 0 {
-            self.layer_used_select = false;
-        }
-        if released & SCE_CTRL_SELECT != 0 && !self.layer_used_select {
-            if let Some(&vk) = self.km.base.get(&Btn::Select) {
-                out.push(Out::Key(vk, true));
-                self.select_release_in = 2;
-            }
-        }
-        if self.select_release_in > 0 {
-            self.select_release_in -= 1;
-            if self.select_release_in == 0 {
-                if let Some(&vk) = self.km.base.get(&Btn::Select) {
-                    out.push(Out::Key(vk, false));
-                }
-            }
-        }
-        // L: toque corto sin usar la capa = SHIFT durante 2 fotogramas
-        if pressed & SCE_CTRL_LTRIGGER != 0 {
-            self.layer_used_l = self.skip_lr_tap & SCE_CTRL_LTRIGGER != 0;
-        }
-        if released & SCE_CTRL_LTRIGGER != 0 && !self.layer_used_l {
-            if let Some(&vk) = self.km.base.get(&Btn::L) {
-                out.push(Out::Key(vk, true));
-                self.shift_release_in = 2;
-            }
-        }
-        if self.shift_release_in > 0 {
-            self.shift_release_in -= 1;
-            if self.shift_release_in == 0 {
-                if let Some(&vk) = self.km.base.get(&Btn::L) {
-                    out.push(Out::Key(vk, false));
-                }
-            }
-        }
-        // R: mantenido sin usar la capa (más de 8 fotogramas) = CTRL mientras siga pulsado
-        if pressed & SCE_CTRL_RTRIGGER != 0 {
-            self.layer_used_r = self.skip_lr_tap & SCE_CTRL_RTRIGGER != 0;
-            self.r_frames = 0;
-        }
-        self.skip_lr_tap = 0;
-        if down(SCE_CTRL_RTRIGGER) {
-            self.r_frames += 1;
-            if !self.r_ctrl && !self.layer_used_r && self.r_frames > 8 {
-                if let Some(&vk) = self.km.base.get(&Btn::R) {
-                    out.push(Out::Key(vk, true));
-                    self.r_ctrl = true;
-                }
-            }
-        } else if self.r_ctrl {
-            if let Some(&vk) = self.km.base.get(&Btn::R) {
-                out.push(Out::Key(vk, false));
-            }
-            self.r_ctrl = false;
+        if req.toggle_bar {
+            use std::sync::atomic::Ordering::Relaxed;
+            let v = !crate::render::OVERLAY_VISIBLE.load(Relaxed);
+            crate::render::OVERLAY_VISIBLE.store(v, Relaxed);
         }
         self.prev_buttons = buttons;
 
@@ -414,7 +278,7 @@ impl VitaInput {
             let (x, y) = (r.report[0].x as i32, r.report[0].y as i32);
             let zone = (x / 640).clamp(0, 2) as usize + 3 * (y >= 500) as usize;
             if down(SCE_CTRL_LTRIGGER) {
-                self.layer_used_l = true;
+                self.pad.mark_l_used(&self.km, &mut Vec::new());
                 self.km.rear_l[zone]
             } else {
                 self.km.rear[zone]

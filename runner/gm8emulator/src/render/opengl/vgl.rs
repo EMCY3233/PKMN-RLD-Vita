@@ -278,6 +278,11 @@ extern "C" {
     fn mallinfo() -> Mallinfo;
 }
 
+/// MB usados del montón de newlib
+pub fn heap_used_mb() -> usize {
+    unsafe { mallinfo() }.uordblks / 1048576
+}
+
 pub fn mem_report() -> String {
     let mb = |t| unsafe { vglMemFree(t) } / 1048576;
     // montón de newlib (230 MB reservados al arrancar): usado y libre dentro de lo ya pedido al sistema
