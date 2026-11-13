@@ -296,6 +296,10 @@ fn platform_mem_report() -> String {
 fn platform_mem_report() -> String {
     String::new()
 }
+/// Memoria libre (vitaGL y montón) como texto, para el registro
+pub fn mem_report_text() -> String {
+    platform_mem_report()
+}
 
 #[derive(Default)]
 struct LazyTextures {
@@ -935,7 +939,7 @@ impl RendererImpl {
                 // páginas de 2048×4096 (32 MB) si el presupuesto da para dos: los sprites de un combate
                 // (~900 texturas animadas) no caben en 2048×2048 y repartidos en dos páginas cada lote
                 // cambiaba de textura. RLD_LAZY_TALL=0 para volver a 2048×2048.
-                let tall = std::env::var("RLD_LAZY_TALL").map_or(true, |v| v != "0")
+                let tall = std::env::var("RLD_LAZY_TALL").map_or(false, |v| v == "1")
                     && self.lazy.budget_bytes >= (lazy_page() as usize) * (lazy_page() as usize) * 4 * 4;
                 let base_h = if tall { lazy_page() * 2 } else { lazy_page() };
                 let pw = lazy_page().max((w as u32).next_power_of_two() as i32).min(self.max_texture_size() as i32);
@@ -2513,7 +2517,10 @@ impl RendererTrait for RendererImpl {
             .filter_map(|&id| self.texture_rects.get(id as usize).copied().flatten())
             .map(|r| (r.w.max(0) as usize) * (r.h.max(0) as usize))
             .sum();
-        let crowded = non_empty > 1 || live_px * 10 > page_px * 6;
+        // (RLD_COMPACT_CROWDED=1: compactar también si hay más de una página con sprites; en la Vita
+        // provocaba recargas continuas — 900 cargas y 38 vaciados en una partida — sin ganar nada, porque
+        // los cambios de textura entre páginas apenas cuestan)
+        let crowded = std::env::var_os("RLD_COMPACT_CROWDED").is_some() && (non_empty > 1 || live_px * 10 > page_px * 6);
         if !crowded && self.lazy.used_bytes * 2 <= self.lazy.budget_bytes {
             return
         }

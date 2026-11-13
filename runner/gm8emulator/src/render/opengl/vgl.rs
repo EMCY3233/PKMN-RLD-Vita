@@ -261,9 +261,37 @@ unsafe extern "C" fn shim_get_error() -> GLenum {
 }
 
 /// Memoria libre en los montones de vitaGL (para el registro de rendimiento)
+#[repr(C)]
+struct Mallinfo {
+    arena: usize,
+    ordblks: usize,
+    smblks: usize,
+    hblks: usize,
+    hblkhd: usize,
+    usmblks: usize,
+    fsmblks: usize,
+    uordblks: usize,
+    fordblks: usize,
+    keepcost: usize,
+}
+extern "C" {
+    fn mallinfo() -> Mallinfo;
+}
+
 pub fn mem_report() -> String {
     let mb = |t| unsafe { vglMemFree(t) } / 1048576;
-    format!(" | vitaGL libre: CDRAM {} MB, RAM {} MB, phycont {} MB", mb(0), mb(1), mb(2))
+    // montón de newlib (230 MB reservados al arrancar): usado y libre dentro de lo ya pedido al sistema
+    let mi = unsafe { mallinfo() };
+    let heap_total = 230usize;
+    format!(
+        " | vitaGL libre: CDRAM {} MB, RAM {} MB, phycont {} MB | montón: {} MB usados, {} MB sin usar de {}",
+        mb(0),
+        mb(1),
+        mb(2),
+        mi.uordblks / 1048576,
+        heap_total.saturating_sub(mi.uordblks / 1048576),
+        heap_total
+    )
 }
 
 /// (RAM de usuario, CDRAM, phycont) libres, en bytes

@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "vita", feature(alloc_error_hook))]
 #[cfg(all(feature = "vita", not(feature = "desktop")))]
 extern crate ramen_vita as ramen;
 
@@ -72,6 +73,15 @@ fn main() {
         let _ = std::fs::remove_file(format!("{VITA_DIR}/runner.log"));
     }
     std::panic::set_hook(Box::new(|info| startlog(&format!("PANIC: {info}"))));
+    // Sin memoria: dejarlo escrito en runner.log antes de cerrarse (antes solo quedaba un volcado)
+    #[cfg(target_os = "vita")]
+    std::alloc::set_alloc_error_hook(|layout| {
+        startlog(&format!(
+            "SIN MEMORIA: no se pudieron reservar {} KB{}",
+            layout.size() / 1024,
+            crate::render::opengl::mem_report_text()
+        ));
+    });
     startlog(&format!("Reloaded Runner {} ({}) arrancando", env!("CARGO_PKG_VERSION"), std::env::consts::OS));
     // PS Vita: CPU a 444 MHz (por defecto 333), bus y GPU al máximo
     #[cfg(target_os = "vita")]
