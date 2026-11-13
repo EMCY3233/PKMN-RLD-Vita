@@ -83,15 +83,38 @@ fn main() {
         ));
     });
     startlog(&format!("Reloaded Runner {} ({}) arrancando", env!("CARGO_PKG_VERSION"), std::env::consts::OS));
-    // PS Vita: CPU a 444 MHz (por defecto 333), bus y GPU al máximo
+    // PS Vita: CPU a 444 MHz (por defecto 333), bus y GPU al máximo. Se puede cambiar en
+    // ux0:data/reloaded/keymap.ini, sección [rendimiento]: CPU = 444 (por defecto) o 333 (sin overclock)
     #[cfg(target_os = "vita")]
     unsafe {
         use vitasdk_sys::*;
-        let r = scePowerSetArmClockFrequency(444);
-        scePowerSetBusClockFrequency(222);
-        scePowerSetGpuClockFrequency(222);
-        scePowerSetGpuXbarClockFrequency(166);
-        startlog(&format!("Overclock CPU 444 MHz: {}", if r >= 0 { "OK" } else { "falló" }));
+        let mut cpu = 444;
+        if let Ok(text) = std::fs::read_to_string("ux0:data/reloaded/keymap.ini") {
+            let mut sec = String::new();
+            for raw in text.lines() {
+                let l = raw.split(';').next().unwrap_or("").trim();
+                if l.starts_with('[') {
+                    sec = l.to_ascii_lowercase();
+                } else if sec == "[rendimiento]" {
+                    if let Some((k, v)) = l.split_once('=') {
+                        if k.trim().eq_ignore_ascii_case("CPU") {
+                            if let Ok(n) = v.trim().parse::<i32>() {
+                                if matches!(n, 333 | 444) {
+                                    cpu = n;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let r = scePowerSetArmClockFrequency(cpu);
+        if cpu == 444 {
+            scePowerSetBusClockFrequency(222);
+            scePowerSetGpuClockFrequency(222);
+            scePowerSetGpuXbarClockFrequency(166);
+        }
+        startlog(&format!("CPU {} MHz{}: {}", cpu, if cpu == 444 { " (overclock)" } else { " (sin overclock)" }, if r >= 0 { "OK" } else { "falló" }));
     }
     // Sin renderizador real no hacen falta los píxeles de sprites/fondos: no guardarlos (~190 MB)
     #[cfg(not(any(feature = "desktop", feature = "vitagl")))]

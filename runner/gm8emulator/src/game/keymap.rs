@@ -116,7 +116,7 @@ pub fn parse(text: &str) -> Keymap {
         if matches!(section.as_str(), "capa_l" | "capa_r" | "capa_select" | "combos") && dpad_in(&ku) {
             continue
         }
-        if !matches!(section.as_str(), "pantalla") && !k.trim().eq_ignore_ascii_case("LSTICK") {
+        if !matches!(section.as_str(), "pantalla" | "rendimiento") && !k.trim().eq_ignore_ascii_case("LSTICK") {
             km.guide.push((section.clone(), k.trim().to_string(), v.trim().to_string(), comment));
         }
         let (k, v) = (k.trim().to_ascii_uppercase(), v.trim());
