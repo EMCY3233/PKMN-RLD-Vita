@@ -71,12 +71,32 @@ struct Modifier {
     tap_left: u32,
 }
 
+/// Botón de acción pulsado con un modificador que podría ser el principio de una combinación:
+/// su tecla de capa espera unos fotogramas por si llega el resto de la combinación
+#[derive(Clone, Copy)]
+struct Pending {
+    btn: Btn,
+    mask: u32,
+    vk: Option<u8>,
+    left: u32,
+}
+
 #[derive(Default)]
 pub struct PadLogic {
     prev: u32,
     held: HashMap<Btn, u8>,
     combo: Option<usize>,
     mods: [Modifier; 3], // L, R, SELECT
+    pending: Option<Pending>,
+    /// teclas pulsadas en un toque que hay que soltar dentro de N fotogramas
+    delayed_release: Vec<(u8, u32)>,
+}
+
+/// Fotogramas que se espera a que se complete una combinación (~130 ms a 30 fps)
+pub const COMBO_GRACE: u32 = 4;
+
+pub fn is_dir(b: Btn) -> bool {
+    matches!(b, Btn::Up | Btn::Down | Btn::Left | Btn::Right)
 }
 
 const MOD_BTNS: [(Btn, u32); 3] = [(Btn::L, LTRIG), (Btn::R, RTRIG), (Btn::Select, SELECT)];
@@ -89,6 +109,10 @@ impl PadLogic {
     /// Suelta todo (al abrir una página del runner, cambiar de mapa…)
     pub fn release_all(&mut self, km: &Keymap, out: &mut Vec<(u8, bool)>) {
         for (_, vk) in self.held.drain() {
+            out.push((vk, false));
+        }
+        self.pending = None;
+        for (vk, _) in self.delayed_release.drain(..) {
             out.push((vk, false));
         }
         if let Some(ci) = self.combo.take() {
@@ -144,6 +168,17 @@ impl PadLogic {
         let released = !buttons & self.prev;
         let down = |m: u32| buttons & m != 0;
 
+        // toques pendientes de soltar
+        self.delayed_release.retain_mut(|(vk, n)| {
+            *n -= 1;
+            if *n == 0 {
+                out.push((*vk, false));
+                false
+            } else {
+                true
+            }
+        });
+
         // modificadores: inicio de pulsación
         for (i, (_, mask)) in MOD_BTNS.iter().enumerate() {
             if pressed & mask != 0 {
@@ -171,7 +206,16 @@ impl PadLogic {
             order.sort_by_key(|&i| std::cmp::Reverse(km.combos[i].0.len()));
             for ci in order {
                 let (btns, keys) = &km.combos[ci];
-                if btns.iter().all(|&b| down(mask_of(b))) && btns.iter().any(|&b| pressed & mask_of(b) != 0) {
+                // la cruceta y el stick son independientes: nunca forman parte de combinaciones
+                if btns.iter().any(|&b| is_dir(b)) {
+                    continue
+                }
+                let fresh = btns.iter().any(|&b| pressed & mask_of(b) != 0)
+                    || self.pending.map_or(false, |p| btns.contains(&p.btn));
+                if btns.iter().all(|&b| down(mask_of(b))) && fresh {
+                    if self.pending.map_or(false, |p| btns.contains(&p.btn)) {
+                        self.pending = None; // era el principio de esta combinación
+                    }
                     for &b in btns {
                         if let Some(vk) = self.held.remove(&b) {
                             out.push((vk, false));
@@ -195,6 +239,24 @@ impl PadLogic {
             }
         }
         let in_combo = self.combo.is_some();
+
+        // botón en espera: si se suelta o se acaba la espera sin completar la combinación, su tecla
+        if let Some(mut p) = self.pending.take() {
+            if !down(p.mask) {
+                if let Some(vk) = p.vk {
+                    out.push((vk, true));
+                    self.delayed_release.push((vk, TAP_FRAMES));
+                }
+            } else if p.left <= 1 || in_combo {
+                if let (Some(vk), false) = (p.vk, in_combo) {
+                    self.held.insert(p.btn, vk);
+                    out.push((vk, true));
+                }
+            } else {
+                p.left -= 1;
+                self.pending = Some(p);
+            }
+        }
 
         // L y R con SELECT mantenido: su tecla de la capa SELECT (L = F1 ayuda, R = Q misiones)
         for (b, mask) in [(Btn::L, LTRIG), (Btn::R, RTRIG)] {
@@ -224,6 +286,17 @@ impl PadLogic {
                     out.push((vk, false));
                 }
             }
+            if released & mask != 0 && self.pending.map_or(false, |p| p.btn == b) {
+                continue // ya resuelto arriba
+            }
+            if pressed & mask != 0 && is_dir(b) {
+                // cruceta/stick: siempre su tecla, con o sin L/R/SELECT, y sin contar como uso de capa
+                if let Some(&vk) = km.base.get(&b) {
+                    self.held.insert(b, vk);
+                    out.push((vk, true));
+                }
+                continue
+            }
             if pressed & mask != 0 && !in_combo {
                 let vk = if down(SELECT) {
                     self.use_mod(2, km, &mut out);
@@ -237,7 +310,20 @@ impl PadLogic {
                 } else {
                     km.base.get(&b).copied()
                 };
-                if let Some(vk) = vk {
+                // ¿puede ser el principio de una combinación? (los modificadores mantenidos están todos
+                // en ella y le falta algún botón): esperar unos fotogramas antes de decidir
+                let mods_down: Vec<Btn> = MOD_BTNS.iter().filter(|(_, m)| down(*m)).map(|(b, _)| *b).collect();
+                let could = !mods_down.is_empty()
+                    && self.pending.is_none()
+                    && km.combos.iter().any(|(btns, _)| {
+                        btns.contains(&b)
+                            && !btns.iter().any(|&x| is_dir(x))
+                            && mods_down.iter().all(|m| btns.contains(m))
+                            && !btns.iter().all(|&x| down(mask_of(x)))
+                    });
+                if could {
+                    self.pending = Some(Pending { btn: b, mask, vk, left: COMBO_GRACE });
+                } else if let Some(vk) = vk {
                     self.held.insert(b, vk);
                     out.push((vk, true));
                 }
@@ -352,7 +438,9 @@ mod tests {
                 // si es parte de una combinación con ese modificador, la combinación manda
                 let (h, _) = run(&km, &chord(modm, m, 10));
                 let frames_with = h.iter().filter(|s| s.contains(&vk)).count();
-                assert!(frames_with >= 10, "capa {name} {b:?} -> {vk}: solo {frames_with} fotogramas");
+                // con modificador puede esperar COMBO_GRACE fotogramas por si es una combinación
+                let need = if modm == 0 { 10 } else { 10 - COMBO_GRACE as usize - 1 };
+                assert!(frames_with >= need, "capa {name} {b:?} -> {vk}: solo {frames_with} fotogramas");
                 // y ninguna otra tecla salvo la del propio modificador mantenido
                 let others: HashSet<u8> = h.iter().flat_map(|s| s.iter().copied()).filter(|&k| k != vk).collect();
                 assert!(others.is_empty(), "capa {name} {b:?}: teclas de más {others:?}");
@@ -385,9 +473,10 @@ mod tests {
         let (h, _) = run(&km, &[hold(SELECT, 3), hold(0, 6)].concat());
         assert!(h.iter().filter(|s| s.contains(&space)).count() >= 2 && h.last().unwrap().is_empty());
         // L mantenido mucho y luego capa: SHIFT se suelta antes de la tecla de la capa
-        let (h, _) = run(&km, &[hold(LTRIG, 20), hold(LTRIG | CROSS, 5), hold(0, 3)].concat());
+        let (h, _) = run(&km, &[hold(LTRIG, 20), hold(LTRIG | CROSS, 10), hold(0, 3)].concat());
         let s = *km.layer_l.get(&Btn::Cross).unwrap();
-        assert!(h[22].contains(&s) && !h[22].contains(&shift), "{:?}", h[22]);
+        let f = 20 + COMBO_GRACE as usize + 1;
+        assert!(h[f].contains(&s) && !h[f].contains(&shift), "{:?}", h[f]);
     }
 
     #[test]
@@ -428,6 +517,45 @@ mod tests {
         let seq = [hold(LTRIG, 5), hold(LTRIG | RTRIG, 15), hold(LTRIG | RTRIG | CROSS, 30), hold(0, 3)].concat();
         let (h, _) = run(&km, &seq);
         assert!(h[25..50].iter().all(|s| s.len() == 1 && s.contains(&b'P')), "{:?}", &h[25..30]);
+    }
+
+    #[test]
+    fn cruceta_independiente() {
+        for km in maps() {
+            for (m, name) in [(LTRIG, "L"), (RTRIG, "R"), (SELECT, "SELECT"), (LTRIG | RTRIG, "L+R")] {
+                for (d, vk) in [(UP, 0x26u8), (DOWN, 0x28), (LEFT, 0x25), (RIGHT, 0x27)] {
+                    let (h, _) = run(&km, &[hold(m, 2), hold(m | d, 6), hold(m, 2), hold(0, 5)].concat());
+                    assert!(h[2..8].iter().all(|s| s.contains(&vk)), "{name}+{d:x}: {:?}", &h[2..8]);
+                    assert!(h.last().unwrap().is_empty());
+                }
+            }
+            // mover y pulsar acción a la vez: las dos teclas
+            let z = *km.base.get(&Btn::Cross).unwrap();
+            let (h, _) = run(&km, &[hold(UP, 3), hold(UP | CROSS, 4), hold(0, 3)].concat());
+            assert!(h[4].contains(&0x26) && h[4].contains(&z));
+        }
+    }
+
+    #[test]
+    fn combinacion_en_cualquier_orden() {
+        let km = km(DEFAULT_KEYMAP);
+        let combo_vk = 0x71u8; // L+R+CROSS = F2 en el mapa por defecto
+        let layer_s = *km.layer_l.get(&Btn::Cross).unwrap();
+        // L, luego Cruz y, 2 fotogramas después, R: la combinación, sin la tecla de la capa L
+        let (h, _) = run(&km, &[hold(LTRIG, 3), hold(LTRIG | CROSS, 2), hold(LTRIG | CROSS | RTRIG, 10), hold(0, 4)].concat());
+        assert!(h.iter().any(|s| s.contains(&combo_vk)), "{h:?}");
+        assert!(h.iter().all(|s| !s.contains(&layer_s)), "se coló la capa: {h:?}");
+        // L y Cruz sin R: la tecla de la capa (tras la espera) mantenida
+        let (h, _) = run(&km, &[hold(LTRIG, 3), hold(LTRIG | CROSS, 12), hold(0, 6)].concat());
+        assert!(h[3 + COMBO_GRACE as usize + 1].contains(&layer_s) && h[14].contains(&layer_s), "{h:?}");
+        assert!(h.last().unwrap().is_empty());
+        // L y toque rápido de Cruz: toque de la tecla de la capa
+        let (h, _) = run(&km, &[hold(LTRIG, 3), hold(LTRIG | CROSS, 2), hold(LTRIG, 6), hold(0, 6)].concat());
+        assert!(h.iter().filter(|s| s.contains(&layer_s)).count() >= 2, "{h:?}");
+        assert!(h.last().unwrap().is_empty());
+        // los tres a la vez
+        let (h, _) = run(&km, &[hold(LTRIG | RTRIG | CROSS, 8), hold(0, 4)].concat());
+        assert!(h[3].contains(&combo_vk) && h.last().unwrap().is_empty());
     }
 
     #[test]

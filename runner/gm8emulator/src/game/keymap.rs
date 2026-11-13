@@ -110,6 +110,12 @@ pub fn parse(text: &str) -> Keymap {
         }
         let Some((k, v)) = line.split_once('=') else { continue };
         let comment = raw.split_once(';').map(|(_, c)| c.trim().to_string()).unwrap_or_default();
+        // la cruceta es independiente: en las capas y combinaciones no hace nada (no se muestra)
+        let ku = k.trim().to_ascii_uppercase();
+        let dpad_in = |kk: &str| kk.split('+').any(|p| p.trim().starts_with("DPAD_"));
+        if matches!(section.as_str(), "capa_l" | "capa_r" | "capa_select" | "combos") && dpad_in(&ku) {
+            continue
+        }
         if !matches!(section.as_str(), "pantalla") && !k.trim().eq_ignore_ascii_case("LSTICK") {
             km.guide.push((section.clone(), k.trim().to_string(), v.trim().to_string(), comment));
         }

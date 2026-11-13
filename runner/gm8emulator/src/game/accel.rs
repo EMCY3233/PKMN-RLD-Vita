@@ -515,7 +515,22 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
     let mut i = 0;
     let mut made = 0;
     let mut copied = 0;
+    // solo interesan las posiciones que empiezan por 'i' (if), 's' (switch), comillas o '/'
+    const fn interesting() -> [bool; 256] {
+        let mut t = [false; 256];
+        t[b'"' as usize] = true;
+        t[b'\'' as usize] = true;
+        t[b'/' as usize] = true;
+        t[b'i' as usize] = true;
+        t[b's' as usize] = true;
+        t
+    }
+    const INTERESTING: [bool; 256] = interesting();
     while i < src.len() {
+        if !INTERESTING[src[i] as usize] {
+            i += 1;
+            continue
+        }
         // saltar cadenas ("..." y '...', sin escapes en GM8) y comentarios (// y /* */)
         match src[i] {
             q @ (b'"' | b'\'') => {
@@ -543,7 +558,7 @@ pub fn rewrite_lookup_chains(src: &[u8]) -> Option<(Vec<u8>, usize)> {
             _ => (),
         }
         // inicio de sentencia: principio, o tras ';', '{' o '}' (nunca tras un if/else sin llaves)
-        let at_stmt = {
+        let at_stmt = src[i] == b'i' && {
             let mut j = i;
             while j > 0 && src[j - 1].is_ascii_whitespace() {
                 j -= 1;
