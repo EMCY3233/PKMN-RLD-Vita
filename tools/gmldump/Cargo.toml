@@ -1,0 +1,7 @@
+[package]
+name="gmldump"
+version="0.1.0"
+edition="2021"
+[dependencies]
+gm8exe={path="../../runner/gm8exe"}
+image = { version = "0.24", default-features = false, features = ["png"] }

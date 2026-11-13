@@ -1,0 +1,205 @@
+name: Build
+
+# Repositorio público: los minutos de Actions son gratuitos. Aun así solo se compila al enviar cambios del
+# runner o de la Vita a port-inicial (no por pull_request: duplicaba cada compilación), o a mano.
+on:
+  push:
+    branches: [port-inicial]
+    paths: ['runner/**', 'vita/**', '.github/workflows/**']
+  workflow_dispatch:
+
+# Un envío a una rama con pull request abierto lanzaba dos compilaciones idénticas (push y pull_request):
+# la más reciente cancela a la otra, así cada cambio gasta la mitad de minutos de Actions.
+concurrency:
+  group: build-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  linux-runner:
+    name: Runner (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencias
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libx11-dev libxrandr-dev libxi-dev libgl-dev libasound2-dev \
+            libpulse-dev libjack-jackd2-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev cmake
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: runner }
+      - name: Compilar decompilador y runner
+        working-directory: runner
+        run: cargo build --release -p gm8decompiler -p gm8emulator
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runner-linux
+          path: |
+            runner/target/release/gm8emulator
+            runner/target/release/gm8decompiler
+
+  vita-loader-test:
+    name: VPK de prueba (PS Vita)
+    runs-on: ubuntu-24.04
+    container: vitasdk/vitasdk:latest
+    steps:
+      - name: Herramientas base
+        run: apk add --no-cache git curl bash build-base || (apt-get update && apt-get install -y git curl build-essential)
+      - uses: actions/checkout@v4
+      - name: Inventario de librerías gráficas de VitaSDK (vitaGL)
+        continue-on-error: true
+        run: |
+          ls $VITASDK/arm-vita-eabi/lib | grep -iE "gl|shark|mathneon|taihen|kubridge|sdl|gxm" || true
+          ls $VITASDK/arm-vita-eabi/include | grep -iE "gl|shark|sdl" || true
+          ls $VITASDK/arm-vita-eabi/lib/libSceShaccCg* $VITASDK/arm-vita-eabi/lib/libSceShaccCgExt* 2>&1 || true
+          mkdir -p inv && cp $VITASDK/arm-vita-eabi/include/vitaGL.h inv/ || true
+          arm-vita-eabi-nm -g --defined-only $VITASDK/arm-vita-eabi/lib/libvitaGL.a 2>/dev/null | awk '$2=="T"{print $3}' | sort -u > inv/vitagl_symbols.txt || true
+          wc -l inv/vitagl_symbols.txt || true
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: inventario-vitagl
+          path: inv/
+      - name: Rust nightly + cargo-vita
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Instalar cargo-vita
+        run: cargo install cargo-vita --locked
+      - name: Compilar VPK
+        working-directory: vita/loader-test
+        run: |
+          echo "VITASDK=$VITASDK"
+          cargo vita build vpk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-loader-test-vpk
+          path: vita/loader-test/target/armv7-sony-vita-newlibeabihf/release/*.vpk
+
+  vita-runner-bench:
+    name: Runner Vita (benchmark)
+    runs-on: ubuntu-24.04
+    container: vitasdk/vitasdk:latest
+    steps:
+      - name: Herramientas base
+        run: apk add --no-cache git curl bash build-base cmake || (apt-get update && apt-get install -y git curl build-essential cmake)
+      - uses: actions/checkout@v4
+      - name: Rust nightly + cargo-vita
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Instalar cargo-vita
+        run: cargo install cargo-vita --locked
+      - name: Compilar VPK del runner (modo benchmark)
+        working-directory: runner/gm8emulator
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+          # simd-adler32 (decodificador PNG) usa intrínsecos NEON, aún inestables en ARM de 32 bits
+          RUSTFLAGS: "-Zcrate-attr=feature(stdarch_arm_neon_intrinsics)"
+          # strip es incompatible con -Wl,-q (la Vita necesita conservar las relocalizaciones)
+          CARGO_PROFILE_RELEASE_STRIP: "false"
+        shell: bash
+        run: |
+          # Si vita-elf-create no encuentra hueco tras el código (depende del tamaño exacto del
+          # binario), se recompila con 8 KB de relleno (ver ELF_PAD en main.rs)
+          if ! cargo vita build vpk -- --release --no-default-features --features vita 2>&1 | tee build.log; then
+            if grep -q "for SCE data at end of segment" build.log; then
+              echo "::warning::vita-elf-create sin hueco; recompilando con relleno"
+              RLD_ELF_PAD=1 cargo vita build vpk -- --release --no-default-features --features vita
+            else
+              exit 1
+            fi
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-runner-bench-vpk
+          path: runner/target/armv7-sony-vita-newlibeabihf/release/*.vpk
+      - name: Guardar ELF con símbolos (para analizar volcados .psp2dmp)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-runner-bench-elf
+          path: runner/target/armv7-sony-vita-newlibeabihf/release/gm8emulator.elf
+
+  vita-runner-gl:
+    name: Runner Vita con gráficos (vitaGL, experimental)
+    runs-on: ubuntu-24.04
+    container: vitasdk/vitasdk:latest
+    continue-on-error: true
+    steps:
+      - name: Herramientas base
+        run: apk add --no-cache git curl bash build-base cmake || (apt-get update && apt-get install -y git curl build-essential cmake)
+      - uses: actions/checkout@v4
+      - name: Rust nightly + cargo-vita
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal -c rust-src
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Caché de compilación (cargo-vita, crates y objetos)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-vita
+            ~/.cargo/registry
+            ~/.cargo/git
+            runner/target
+            /tmp/vitaGL
+          key: vita-gl-${{ hashFiles('runner/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            vita-gl-${{ hashFiles('runner/Cargo.lock') }}-
+            vita-gl-
+      - name: Instalar cargo-vita
+        run: command -v cargo-vita || cargo install cargo-vita --locked
+      - name: vitaGL propio (TEXTURES_SPEEDHACK)
+        # El vitaGL de VitaSDK copia la textura ENTERA cada vez que se actualiza un trozo de una
+        # textura usada en los últimos 4 fotogramas (glTexSubImage2D). Las páginas de sprites
+        # diferidos son de 32 MB y se usan en cada fotograma: cada sprite nuevo costaba ~500 ms
+        # (los tirones periódicos del registro). Con TEXTURES_SPEEDHACK se escribe en su sitio; el
+        # runner solo escribe en huecos libres de la página, así que no hay riesgo de pisar algo que
+        # la GPU esté dibujando. Mismo commit y opciones que el paquete de VitaSDK + la opción.
+        shell: bash
+        run: |
+          if [ ! -f /tmp/vitaGL/libvitaGL.a ]; then
+            rm -rf /tmp/vitaGL
+            git clone https://github.com/Rinnegatamante/vitaGL.git /tmp/vitaGL
+            cd /tmp/vitaGL
+            git checkout 2bdbe895ddc6a7e410a9ea55a8f53d8173c61ad8 || echo "commit no encontrado: se usa HEAD"
+            make NO_DEBUG=1 TEXTURES_SPEEDHACK=1 -j$(nproc)
+          fi
+          cd /tmp/vitaGL
+          cp libvitaGL.a $VITASDK/arm-vita-eabi/lib/libvitaGL.a
+          cp source/vitaGL.h $VITASDK/arm-vita-eabi/include/vitaGL.h
+      - name: Compilar VPK del runner con vitaGL
+        working-directory: runner/gm8emulator
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+          RUSTFLAGS: "-Zcrate-attr=feature(stdarch_arm_neon_intrinsics)"
+          CARGO_PROFILE_RELEASE_STRIP: "false"
+        shell: bash
+        run: |
+          if ! cargo vita build vpk -- --release --no-default-features --features vitagl 2>&1 | tee build.log; then
+            if grep -q "for SCE data at end of segment" build.log; then
+              RLD_ELF_PAD=1 cargo vita build vpk -- --release --no-default-features --features vitagl
+            else
+              exit 1
+            fi
+          fi
+      - name: Identificador propio (se instala junto a la versión benchmark)
+        working-directory: runner/target/armv7-sony-vita-newlibeabihf/release
+        shell: bash
+        run: |
+          vita-mksfoex -s TITLE_ID=PKRLD0010 -d ATTRIBUTE2=12 "Pokemon Reloaded" gl.sfo
+          LA="$GITHUB_WORKSPACE/vita/livearea"
+          vita-pack-vpk -s gl.sfo -b gm8emulator.self \
+            -a "$LA/icon0.png=sce_sys/icon0.png" \
+            -a "$LA/bg0.png=sce_sys/livearea/contents/bg0.png" \
+            -a "$LA/startup.png=sce_sys/livearea/contents/startup.png" \
+            -a "$LA/template.xml=sce_sys/livearea/contents/template.xml" \
+            -a "$GITHUB_WORKSPACE/vita/soundfont.sf2=soundfont.sf2" \
+            ReloadedGL.vpk
+          rm -f gm8emulator.vpk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-runner-gl-vpk
+          path: runner/target/armv7-sony-vita-newlibeabihf/release/*.vpk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reloaded-runner-gl-elf
+          path: runner/target/armv7-sony-vita-newlibeabihf/release/gm8emulator.elf

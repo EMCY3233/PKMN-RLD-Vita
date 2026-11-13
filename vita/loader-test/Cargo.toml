@@ -1,0 +1,21 @@
+[package]
+name = "reloaded-loader-test"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0"
+
+[workspace]
+
+[dependencies]
+gm8exe = { path = "../../runner/gm8exe" }
+
+[package.metadata.vita]
+title_id = "PKRLD0001"
+title_name = "Reloaded Loader Test"
+
+
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+panic = "unwind"

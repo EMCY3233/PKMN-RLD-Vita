@@ -1,0 +1,9 @@
+target/
+/versions/
+/cache/
+# Archivos del juego: no se suben (tamaño y derechos). Cada usuario usa su propia copia.
+*.exe
+*.zip
+/data/
+*.gmk
+runner/target-*/
