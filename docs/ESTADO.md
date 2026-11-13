@@ -13,9 +13,10 @@
   SecurityPK2 falla (actual1 se pone a 0 antes de comprobar) y salta el aviso 8315692.
 
 ## Repositorio
-- `port-inicial`: código. `kit-vitasdk`: kit de compilación de la Vita (224 MB). Repositorio privado.
-- CI: solo compila el VPK con gráficos al enviar cambios de runner/, vita/ o la CI a port-inicial; los envíos
-  con `[skip ci]` no compilan. El resto de trabajos, a mano (Actions → Run workflow → todos).
+- `port-inicial`: código. `kit-vitasdk`: kit de compilación de la Vita (224 MB). Repositorio **público** desde
+  el 13/11/2026 (minutos de Actions gratuitos).
+- CI: compila los cuatro trabajos (Linux, benchmark, VPK de prueba y VPK con gráficos) al enviar cambios de
+  runner/, vita/ o la CI a port-inicial, o a mano (Actions → Run workflow). Los envíos con `[skip ci]` no compilan.
 
 # Compilar y probar sin GitHub Actions
 

@@ -1,7 +1,7 @@
 # Compilar y probar sin GitHub Actions
 
-GitHub Actions en un repositorio privado tiene 2.000 minutos al mes en el plan gratuito; cada VPK son ~7.
-Todo lo necesario para compilar fuera de Actions está guardado en el repositorio.
+El repositorio es público y GitHub Actions compila gratis. Esto es por si hace falta compilar fuera de Actions
+(sin conexión a GitHub, más rápido o si vuelve a ser privado).
 
 ## Dónde está cada cosa
 | Qué | Dónde |
